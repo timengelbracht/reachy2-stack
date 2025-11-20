@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "reachy2-stack"
+version = "0.1.0"
+description = "Modular demo + research stack for Reachy 2"
+authors = [
+  { name = "Tim Engelbracht" }
+]
+readme = "README.md"
+requires-python = ">=3.10"
+
+# ---- Runtime requirements (minimal) ----
+dependencies = [
+  "numpy>=1.22",
+  "pyyaml>=6.0",
+  "opencv-python>=4.7.0",
+]
+ 
+# ---- Optional dependency groups ----
+[project.optional-dependencies]
+
+# Development tools
+dev = [
+  "black>=23.0",
+  "ruff>=0.2.0",
+  "mypy>=1.0",
+  "numpy-stubs>=0.4.0",
+]
+
+# Robot-side packages (kept separate so RT deps stay clean)
+robot = [
+  "reachy2-sdk==1.0.15",
+]
