@@ -17,6 +17,7 @@ dependencies = [
   "numpy>=1.22",
   "pyyaml>=6.0",
   "opencv-python>=4.7.0",
+  "reachy2-sdk==1.0.15",
 ]
  
 # ---- Optional dependency groups ----
@@ -30,7 +31,4 @@ dev = [
   "numpy-stubs>=0.4.0",
 ]
 
-# Robot-side packages (kept separate so RT deps stay clean)
-robot = [
-  "reachy2-sdk==1.0.15",
-]
+
