@@ -189,7 +189,6 @@ def pass_focal_length(focal_length: float):                  # focal is a scalar
         localize_inloc.pose_from_cluster = original
 
 
-
 class HLocLocalizer:
     def __init__(self, cfg: HLocMapConfig):
         self.cfg = cfg

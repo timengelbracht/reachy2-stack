@@ -36,6 +36,11 @@ visual-localization = [
   "hloc @ git+https://github.com/cvg/Hierarchical-Localization.git@708823d5b07cbf6b6cdf1110633fd9f936447ff4",
 ]
 
+# Vision Models
+vision-models = [
+  transformers @ git+https://github.com/huggingface/transformers.git
+]
+
 [tool.hatch.metadata]
 allow-direct-references = true
 

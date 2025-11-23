@@ -24,12 +24,27 @@ class MappingInputLeica:
     pano_pose_path: Path   # pose .txt of the panorama
     mesh_path: Path        # mesh of the scan used for depth rendering
 
+    @classmethod
+    def from_yaml(cls, path: str) -> "MappingInputLeica":
+        import yaml
+
+        with open(path, "r") as f:
+            data = yaml.safe_load(f)
+        return cls(**data)
 
 @dataclass
-class HLocMapConfig:
+class HLocConfig:
     maps_root: Path         # root folder for all maps
     location_name: str      # e.g. "kitchen_1"
     overwrite: bool = False
+
+    @classmethod
+    def from_yaml(cls, path: str) -> "HLocConfig":
+        import yaml
+
+        with open(path, "r") as f:
+            data = yaml.safe_load(f)
+        return cls(**data)
 
 def make_equirect_to_pinhole(equi_img: np.ndarray,
                         rot_mat: np.ndarray,

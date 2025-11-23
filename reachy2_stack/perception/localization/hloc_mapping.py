@@ -11,14 +11,13 @@ import math
 import cv2
 import json
 
-from reachy2_stack.utils.utils_mapping import process_leica_for_hloc, MappingInputLeica, HLocMapConfig
+from reachy2_stack.utils.utils_mapping import process_leica_for_hloc, MappingInputLeica, HLocConfig
 from reachy2_stack.perception.localization.hloc_localizer import HLocLocalizer
-
 
 
 def build_hloc_map_from_leica(
     mapping_input: MappingInputLeica,
-    cfg: HLocMapConfig,
+    cfg: HLocConfig,
 ) -> Path:
     """Build or update an HLoc/ COLMAP map for one location.
     build .mat files from rendered RGBD panoramas and poses and bring into hloc format
