@@ -43,7 +43,7 @@ class Sam3Segmenter:
             self.device = torch.device("cpu")
         else:
             self.device = torch.device(cfg.device)
-            dtype = "float16" if self.device.type == "cuda" else "float32"
+            dtype = torch.float32
 
         # Load HF SAM3 model + processor
         # self.model = Sam3Model.from_pretrained(cfg.model_name).to(self.device)
@@ -118,6 +118,101 @@ class Sam3Segmenter:
             )
 
         return results
+
+    def segment_batch_with_text(
+        self,
+        rgbs: List[np.ndarray],
+        prompts: List[str] | str,
+    ) -> List[List[Dict[str, Any]]]:
+        """
+        Batch version of segment_with_text.
+
+        Args:
+            rgbs: list of RGB images, each [H, W, 3] (uint8 or float in [0,1]).
+            prompts:
+                - either a single string (same prompt for all images), or
+                - a list of strings of length len(rgbs) (one prompt per image).
+
+        Returns:
+            A list of length B (batch size). Each element is a list of dicts:
+                [
+                  [
+                    {"mask": ..., "bbox": ..., "score": ..., "label": ...},  # image 0, instance 0
+                    {"mask": ..., "bbox": ..., "score": ..., "label": ...},  # image 0, instance 1
+                    ...
+                  ],
+                  [
+                    {"mask": ..., "bbox": ..., "score": ..., "label": ...},  # image 1, instance 0
+                    ...
+                  ],
+                  ...
+                ]
+        """
+        if len(rgbs) == 0:
+            return []
+
+        images = [self._to_pil(rgb) for rgb in rgbs]
+
+        # Normalize prompts to a list
+        if isinstance(prompts, str):
+            text_list = [prompts] * len(images)
+        else:
+            if len(prompts) != len(images):
+                raise ValueError(
+                    f"len(prompts) ({len(prompts)}) must match len(rgbs) ({len(rgbs)})"
+                )
+            text_list = prompts
+
+        # Build batched inputs
+        inputs = self.processor(
+            images=images,
+            text=text_list,
+            return_tensors="pt",
+        ).to(self.device)
+
+        with torch.no_grad():
+            if self.device.type == "cuda":
+                # optional autocast, especially if you loaded in fp16/bf16
+                with torch.autocast(device_type="cuda", dtype=self.model.dtype):
+                    outputs = self.model(**inputs)
+            else:
+                outputs = self.model(**inputs)
+
+        # Post-process all images in the batch
+        processed_batch = self.processor.post_process_instance_segmentation(
+            outputs,
+            threshold=self.cfg.score_threshold,
+            mask_threshold=self.cfg.mask_threshold,
+            target_sizes=inputs.get("original_sizes").tolist(),  # [[H, W], ...] length B
+        )
+
+        all_results: List[List[Dict[str, Any]]] = []
+
+        for img_idx, processed in enumerate(processed_batch):
+            masks = processed["masks"]      # [N_i, H, W]
+            boxes = processed["boxes"]      # [N_i, 4]
+            scores = processed["scores"]    # [N_i]
+
+            img_results: List[Dict[str, Any]] = []
+            label = text_list[img_idx]
+
+            for mask_t, box_t, score_t in zip(masks, boxes, scores):
+                mask_np = mask_t.cpu().numpy().astype(bool)
+                box_np = tuple(float(x) for x in box_t.cpu().tolist())
+                score_f = float(score_t.cpu().item())
+
+                img_results.append(
+                    {
+                        "mask": mask_np,
+                        "bbox": box_np,
+                        "score": score_f,
+                        "label": label,
+                    }
+                )
+
+            all_results.append(img_results)
+
+        return all_results
 
     # Optional: automatic mask generation without text
     def segment_auto(
