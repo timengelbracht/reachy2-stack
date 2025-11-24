@@ -22,7 +22,8 @@ from reachy2_stack.perception.segmentation_detection.sam3_segmenter import (
 # ================================================================
 # EDIT THESE
 # ================================================================
-IMAGE_PATH = "/exchange/data/hloc/mlhall_processed_leica/rgb/027.jpg"       # change this
+IMAGE_PATH = "/exchange/data/hloc/mlhall_processed_leica/rgb/015.jpg"       # change this
+OUTPUT_PATH = "/exchange/data/hloc/mlhall_processed_leica/test/"  # change this
 TEXT_PROMPT = "black cabinet handle"                        # change this
 DEVICE = "cuda"                               # "cuda" or "cpu"
 SCORE_THRESHOLD = 0.5
@@ -102,9 +103,9 @@ def main():
     # visualization
     vis = overlay_masks_and_boxes(pil_img, results, alpha=MASK_ALPHA)
 
-    out_path = img_path.with_name(
-        f"{img_path.stem}_sam3_{TEXT_PROMPT.replace(' ', '_')}{img_path.suffix}"
-    )
+    out_dir = Path(OUTPUT_PATH)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{img_path.stem}_sam3_{TEXT_PROMPT.replace(' ', '_')}.png"
 
     vis.save(out_path)
     print(f"[INFO] Visualization saved to: {out_path}")
