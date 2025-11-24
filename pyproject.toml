@@ -38,7 +38,7 @@ visual-localization = [
 
 # Vision Models
 vision-models = [
-  transformers @ git+https://github.com/huggingface/transformers.git
+  "transformers @ git+https://github.com/huggingface/transformers.git"
 ]
 
 [tool.hatch.metadata]
