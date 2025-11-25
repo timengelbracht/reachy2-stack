@@ -8,14 +8,7 @@ import torch
 from PIL import Image
 from transformers import Sam3Processor, Sam3Model
 
-
-@dataclass
-class Sam3Config:
-    """Configuration for the SAM3 segmenter."""
-    model_name: str = "facebook/sam3"
-    device: str = "cuda"  # "cuda" or "cpu"
-    score_threshold: float = 0.5
-    mask_threshold: float = 0.5
+from reachy2_stack.utils.utils_dataclass import Sam3Config
 
 
 class Sam3Segmenter:

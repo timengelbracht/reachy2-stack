@@ -9,16 +9,7 @@ import numpy as np
 from reachy2_stack.core.client import ReachyClient
 from reachy2_stack.infra.world_model import WorldModel
 from reachy2_stack.perception.segmentation_detection.sam3_segmenter import Sam3Config, Sam3Segmenter
-
-
-@dataclass
-class ConceptDetection:
-    label: str
-    mask: np.ndarray             # HxW bool
-    score: float
-    bbox: tuple[int, int, int, int]
-    position_world: np.ndarray   # 3D point in world frame (e.g., mask centroid)
-
+from reachy2_stack.utils.utils_dataclass import ConceptDetection
 
 class Sam3ConceptDetector:
     """Bridge between Reachy (RGBD + poses) and SAM3 segmenter."""

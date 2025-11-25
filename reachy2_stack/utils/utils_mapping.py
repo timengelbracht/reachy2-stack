@@ -17,35 +17,6 @@ from reachy2_stack.utils.utils_pointclouds import load_mesh
 from reachy2_stack.utils.utils_rendering import DepthRenderer, depth_to_world_xyz
 from dataclasses import dataclass
 
-@dataclass
-class MappingInputLeica:
-    """Minimal representation for map building from leica."""
-    pano_path: Path        # RGB panorama
-    pano_pose_path: Path   # pose .txt of the panorama
-    mesh_path: Path        # mesh of the scan used for depth rendering
-
-    @classmethod
-    def from_yaml(cls, path: str) -> "MappingInputLeica":
-        import yaml
-
-        with open(path, "r") as f:
-            data = yaml.safe_load(f)
-        return cls(**data)
-
-@dataclass
-class HLocConfig:
-    maps_root: Path         # root folder for all maps
-    location_name: str      # e.g. "kitchen_1"
-    overwrite: bool = False
-
-    @classmethod
-    def from_yaml(cls, path: str) -> "HLocConfig":
-        import yaml
-
-        with open(path, "r") as f:
-            data = yaml.safe_load(f)
-        return cls(**data)
-
 def make_equirect_to_pinhole(equi_img: np.ndarray,
                         rot_mat: np.ndarray,
                         hfov_deg: float,
@@ -196,13 +167,16 @@ def process_leica_for_hloc(
     mesh_path: Path,
     out_base: Path,
     overwrite: bool = False,
+    num_database_images: int = 20,
 ) -> Path:
 
     # create rectified crops of the panorama and depth renderings
     hfov = 90.0
     vfov = 120.0
     W, H = 1024, 1364
-    step = hfov * 0.1
+    # step = hfov * 0.2
+    num_database_images = num_database_images
+    step = 360.0 / num_database_images
 
     # compute intrinsics
     fx = (W/2) / math.tan(math.radians(hfov/2))
