@@ -7,21 +7,7 @@ import numpy as np
 from reachy2_sdk import ReachySDK
 from reachy2_sdk.media.camera import CameraView
 
-
-@dataclass
-class ReachyConfig:
-    host: str = "10.0.0.201"
-    use_sim: bool = False
-    default_speed: float = 0.5
-    # extend with joint names, mapping, etc. later
-
-    @classmethod
-    def from_yaml(cls, path: str) -> "ReachyConfig":
-        import yaml
-
-        with open(path, "r") as f:
-            data = yaml.safe_load(f)
-        return cls(**data)
+from reachy2_stack.utils.utils_dataclass import ReachyConfig, ReachyCameraData, TeleopCameraData, DepthCameraData
 
 
 class ReachyClient:
@@ -53,6 +39,17 @@ class ReachyClient:
         """Connect to the robot/sim. Idempotent."""
         _ = self.connect_reachy
 
+    def close(self) -> None:
+        """Cleanly close the underlying ReachySDK client."""
+        if self.reachy is not None:
+            # ReachySDK supports context-manager style, so it should have close().
+            try:
+                self.reachy.close()
+            except AttributeError:
+                # Fallback: just drop the reference; background thread will die when process ends.
+                pass
+            self.reachy = None
+            
     # --- joint state ---
 
     def get_joint_state_right(self) -> Tuple[np.ndarray, np.ndarray]:
@@ -61,7 +58,7 @@ class ReachyClient:
         For now:
         - positions = reachy.r_arm.get_current_positions()  # 7-DoF, degrees
         """
-        self.connect()
+        # self.connect()
         assert self.reachy is not None
 
         q_r = np.array(self.reachy.r_arm.get_current_positions(), dtype=float)
@@ -74,7 +71,7 @@ class ReachyClient:
         For now:
         - positions = reachy.l_arm.get_current_positions()  # 7-DoF, degrees
         """
-        self.connect()
+        # self.connect()
         assert self.reachy is not None
 
         q_l = np.array(self.reachy.l_arm.get_current_positions(), dtype=float)
@@ -90,7 +87,7 @@ class ReachyClient:
             reachy.r_arm.gripper.get_current_opening()  # 0..100
         We just normalize it to 0..1.
         """
-        self.connect()
+        # self.connect()
         assert self.reachy is not None
 
         g = self.reachy.r_arm.gripper
@@ -104,7 +101,7 @@ class ReachyClient:
             reachy.l_arm.gripper.get_current_opening()  # 0..100
         We just normalize it to 0..1.
         """
-        self.connect()
+        # self.connect()
         assert self.reachy is not None
 
         g = self.reachy.l_arm.gripper
@@ -115,7 +112,7 @@ class ReachyClient:
 
     def get_mobile_odometry(self) -> Optional[dict]:
         """Return raw odometry dict from mobile_base, or None if no base."""
-        self.connect()
+        # self.connect()
         assert self.reachy is not None
 
         mb = getattr(self.reachy, "mobile_base", None)
@@ -128,7 +125,7 @@ class ReachyClient:
 
     def get_teleop_rgb_left(self) -> Optional[np.ndarray]:
         """Return LEFT teleop RGB frame, or None if missing."""
-        self.connect()
+        # self.connect()
         assert self.reachy is not None
 
         cams = getattr(self.reachy, "cameras", None)
@@ -139,7 +136,7 @@ class ReachyClient:
 
     def get_teleop_rgb_right(self) -> Optional[np.ndarray]:
         """Return RIGHT teleop RGB frame, or None if missing."""
-        self.connect()
+        # self.connect()
         assert self.reachy is not None
 
         cams = getattr(self.reachy, "cameras", None)
@@ -152,7 +149,7 @@ class ReachyClient:
 
     def get_depth_rgbd(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         """Return (rgb, depth) from depth camera, or (None, None) if missing."""
-        self.connect()
+        # self.connect()
         assert self.reachy is not None
 
         cams = getattr(self.reachy, "cameras", None)
@@ -167,7 +164,7 @@ class ReachyClient:
 
     def get_teleop_intrinsics_left(self) -> Dict[str, Any]:
         """Return raw intrinsics for teleop camera in a dict."""
-        self.connect()
+        # self.connect()
         assert self.reachy is not None
 
         h, w, distortion_model, D, K, R, P = self.reachy.cameras.teleop.get_parameters(
@@ -185,7 +182,7 @@ class ReachyClient:
 
     def get_teleop_intrinsics_right(self) -> Dict[str, Any]:
         """Return raw intrinsics for teleop camera in a dict."""
-        self.connect()
+        # self.connect()
         assert self.reachy is not None
 
         h, w, distortion_model, D, K, R, P = self.reachy.cameras.teleop.get_parameters(
@@ -203,21 +200,21 @@ class ReachyClient:
 
     def get_teleop_extrinsics_left(self) -> np.ndarray:
         """Return 4x4 T_base_cam for LEFT teleop camera in robot/base frame."""
-        self.connect()
+        # self.connect()
         assert self.reachy is not None
         T = self.reachy.cameras.teleop.get_extrinsics(CameraView.LEFT)
         return np.asarray(T, dtype=float)
 
     def get_teleop_extrinsics_right(self) -> np.ndarray:
         """Return 4x4 T_base_cam for RIGHT teleop camera in robot/base frame."""
-        self.connect()
+        # self.connect()
         assert self.reachy is not None
         T = self.reachy.cameras.teleop.get_extrinsics(CameraView.RIGHT)
         return np.asarray(T, dtype=float)
 
     def get_depth_intrinsics(self, view: Optional[CameraView] = None) -> Dict[str, Any]:
         """Return intrinsics for depth camera (RGB or DEPTH view)."""
-        self.connect()
+        # self.connect()
         assert self.reachy is not None
 
         if view is None:
@@ -242,7 +239,7 @@ class ReachyClient:
         self, view: Optional[CameraView] = None
     ) -> np.ndarray:
         """Return 4x4 T_base_cam for depth camera in robot/base frame."""
-        self.connect()
+        # self.connect()
         assert self.reachy is not None
 
         if view is None:
@@ -250,6 +247,71 @@ class ReachyClient:
         else:
             T = self.reachy.cameras.depth.get_extrinsics(view)
         return np.asarray(T, dtype=float)
+    
+    def get_all_camera_data(self) -> ReachyCameraData:
+        # self.connect()
+        assert self.reachy is not None
+
+        # Teleop left
+        teleop_left = TeleopCameraData(
+            rgb=self.get_teleop_rgb_left(),
+            intrinsics=self.get_teleop_intrinsics_left(),
+            extrinsics=self.get_teleop_extrinsics_left(),
+        )
+
+        # Teleop right
+        teleop_right = TeleopCameraData(
+            rgb=self.get_teleop_rgb_right(),
+            intrinsics=self.get_teleop_intrinsics_right(),
+            extrinsics=self.get_teleop_extrinsics_right(),
+        )
+
+        # Depth camera
+        depth_rgb, depth_map = self.get_depth_rgbd()
+        depth = DepthCameraData(
+            rgb=depth_rgb,
+            depth=depth_map,
+            intrinsics=self.get_depth_intrinsics(),
+            extrinsics=self.get_depth_extrinsics(),
+        )
+
+        return ReachyCameraData(
+            teleop_left=teleop_left,
+            teleop_right=teleop_right,
+            depth=depth,
+        )
+    
+    def get_teleop_left_camera_data(self) -> TeleopCameraData:
+        # self.connect()
+        assert self.reachy is not None
+
+        return TeleopCameraData(
+            rgb=self.get_teleop_rgb_left(),
+            intrinsics=self.get_teleop_intrinsics_left(),
+            extrinsics=self.get_teleop_extrinsics_left(),
+        )
+    
+    def get_teleop_right_camera_data(self) -> TeleopCameraData:
+        # self.connect()
+        assert self.reachy is not None
+
+        return TeleopCameraData(
+            rgb=self.get_teleop_rgb_right(),
+            intrinsics=self.get_teleop_intrinsics_right(),
+            extrinsics=self.get_teleop_extrinsics_right(),
+        )
+    
+    def get_depth_camera_data(self) -> DepthCameraData:
+        # self.connect()
+        assert self.reachy is not None
+
+        rgb, depth_map = self.get_depth_rgbd()
+        return DepthCameraData(
+            rgb=rgb,
+            depth=depth_map,
+            intrinsics=self.get_depth_intrinsics(),
+            extrinsics=self.get_depth_extrinsics(),
+        )
 
     # --- generic action interfaces (to be filled in later) ---
 

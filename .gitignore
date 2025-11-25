@@ -1,6 +1,9 @@
 # Created by https://www.toptal.com/developers/gitignore/api/python,git,venv
 # Edit at https://www.toptal.com/developers/gitignore?templates=python,git,venv
 
+.hf_cache/
+.data/
+
 ### Git ###
 # Created by git for backups. To disable backups in Git:
 # $ git config --global mergetool.keepBackup false
@@ -201,3 +204,6 @@ pyvenv.cfg
 pip-selfcheck.json
 
 # End of https://www.toptal.com/developers/gitignore/api/python,git,venv
+data/
+.vscode/
+
