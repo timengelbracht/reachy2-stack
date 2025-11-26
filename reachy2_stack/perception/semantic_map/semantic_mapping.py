@@ -366,6 +366,12 @@ class SemanticMapBuilder:
         articulation_axis_arr = data.get("articulation_axis", None)
         handle_longest_axis_arr = data.get("handle_longest_axis", None)
 
+        # synamic states
+        open_fraction_arr = data.get("open_fraction", None)
+        is_open_arr = data.get("is_open", None)
+        last_handle_pos_arr = data.get("last_handle_position_world", None)
+        last_update_time_arr = data.get("last_update_time", None)
+
         instances: List[ArticulatedObjectInstance] = []
         N = len(class_names)
 
@@ -409,6 +415,22 @@ class SemanticMapBuilder:
                 handle_pts = np.asarray(handle_points3d_arr[i])
             else:
                 handle_pts = np.zeros((0, 3), dtype=float)
+            if open_fraction_arr is not None:
+                open_fraction = float(open_fraction_arr[i])
+            else:
+                open_fraction = 0.0
+            if is_open_arr is not None:
+                is_open = bool(is_open_arr[i])
+            else:
+                is_open = False
+            if last_handle_pos_arr is not None:
+                last_handle_pos = np.asarray(last_handle_pos_arr[i], dtype=float)
+            else:
+                last_handle_pos = None
+            if last_update_time_arr is not None:
+                last_update_time = float(last_update_time_arr[i])
+            else:
+                last_update_time = 0.0
                 
             instances.append(
                 ArticulatedObjectInstance(
@@ -427,11 +449,116 @@ class SemanticMapBuilder:
                     articulation_type=articulation_type,
                     articulation_axis=articulation_axis,
                     handle_longest_axis=handle_longest_axis,
+                    open_fraction=open_fraction,
+                    is_open=is_open,
+                    last_handle_position_world=last_handle_pos,
+                    last_update_time=last_update_time,
                 )
             )
 
         return instances
 
+    def update_instance_state(
+        self,
+        instance_id: int,
+        *,
+        open_fraction: float | None = None,
+        is_open: bool | None = None,
+        last_handle_position_world: np.ndarray | None = None,
+        timestamp: float | None = None,
+    ) -> None:
+        """Update dynamic state for a single instance (in memory only)."""
+        if timestamp is None:
+            timestamp = time.time()
+
+        # find instance by id
+        matches = [inst for inst in self.instances if inst.id == instance_id]
+        if not matches:
+            raise KeyError(f"No ArticulatedObjectInstance with id={instance_id}")
+        inst = matches[0]
+
+        if open_fraction is not None:
+            inst.open_fraction = float(open_fraction)
+        if is_open is not None:
+            inst.is_open = bool(is_open)
+        if last_handle_position_world is not None:
+            inst.last_handle_position_world = np.asarray(
+                last_handle_position_world, dtype=float
+            )
+        inst.last_update_time = float(timestamp)
+
+    def save_dynamic_state(
+        self,
+        db_path: Path | None = None,
+    ) -> Path:
+        """
+        Save dynamic state fields (open_fraction, is_open, last_handle_position_world,
+        last_update_time) from self.instances back into the NPZ.
+
+        - If the NPZ does not have these arrays yet, they are added.
+        - If it does, they are overwritten.
+        """
+        if db_path is None:
+            db_path = self.cfg.maps_root / self.cfg.location_name / self.cfg.db_name
+
+        if not db_path.exists():
+            raise FileNotFoundError(f"[save_dynamic_state] Semantic map not found at {db_path}")
+
+        data = np.load(db_path, allow_pickle=True)
+        N = len(self.instances)
+        if N == 0:
+            raise RuntimeError("[save_dynamic_state] No instances in memory to save.")
+
+        # Sanity-check N vs NPZ size
+        class_names = data["class_names"]
+        if len(class_names) != N:
+            raise ValueError(
+                f"[save_dynamic_state] Mismatch: NPZ has {len(class_names)} instances, "
+                f"but builder has {N} in memory."
+            )
+
+        # Build arrays from current instances
+        open_fraction_arr = np.zeros((N,), dtype=float)
+        is_open_arr = np.zeros((N,), dtype=bool)
+        last_handle_pos_arr = np.full((N, 3), np.nan, dtype=float)
+        last_update_time_arr = np.zeros((N,), dtype=float)
+
+        for i, inst in enumerate(self.instances):
+            open_fraction_arr[i] = float(inst.open_fraction)
+            is_open_arr[i] = bool(inst.is_open)
+
+            if inst.last_handle_position_world is not None:
+                last_handle_pos_arr[i, :] = np.asarray(
+                    inst.last_handle_position_world, dtype=float
+                )
+
+            last_update_time_arr[i] = float(inst.last_update_time)
+
+        # Copy existing data and insert/overwrite dynamic fields
+        new_data: Dict[str, np.ndarray] = {k: data[k] for k in data.files}
+        new_data["open_fraction"] = open_fraction_arr
+        new_data["is_open"] = is_open_arr
+        new_data["last_handle_position_world"] = last_handle_pos_arr
+        new_data["last_update_time"] = last_update_time_arr
+
+        np.savez(db_path, **new_data)
+        print(f"[save_dynamic_state] Wrote dynamic state to {db_path}")
+
+        return db_path
+    
+    def reset_dynamic_state(self) -> None:
+        """
+        Reset dynamic state (open_fraction, is_open, last_handle_position_world,
+        last_update_time) for all loaded instances *in memory only*.
+        """
+        if not self.instances:
+            return
+
+        for inst in self.instances:
+            inst.open_fraction = 0.0
+            inst.is_open = False
+            inst.last_handle_position_world = None
+            inst.last_update_time = 0.0
 
     # ------------------------------------------------------------------
     # helpers

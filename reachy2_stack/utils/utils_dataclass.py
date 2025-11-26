@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 import numpy as np
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
 from pathlib import Path
 from dataclasses import field
 
@@ -84,7 +84,12 @@ class ArticulatedObjectInstance:
     articulation_axis: np.ndarray     # (3,) - estimated axis of rotation/translation
     handle_longest_axis: np.ndarray  # (3,) - estimated longest axis of handle
 
-
+    # state variables
+    open_fraction: float = 0.0               # 0=closed, 1=open
+    is_open: bool = False
+    last_handle_position_world: Optional[np.ndarray] = None
+    last_update_time: float = field(default_factory=lambda: 0.0)
+    
 @dataclass
 class ArticulatedClassConfig:
     """
