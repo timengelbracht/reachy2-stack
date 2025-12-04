@@ -23,9 +23,11 @@ map_cfg = SemanticMapConfig(
 
 builder = SemanticMapBuilder(sam_cfg, map_cfg)
 
+
 db_path = builder.build_from_mat_folder(
     mat_dir=Path("/exchange/data/hloc/mlhall_hloc_registration/inloc/database/cutouts/")  # your folder
 )
+instances= builder.load_semantic_map(db_path=db_path)
 
 print("Semantic map saved at:", db_path)
 

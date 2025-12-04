@@ -1,138 +1,154 @@
 #!/usr/bin/env python3
 """
-Interactive debugging script for verifying WorldModel + SE(3) plumbing.
+Interactive debugging script for verifying WorldModel + ReachyClient + HLoc + visualization.
 
 Run with:
     python tests/test_world_model.py
 """
 
+import os
+from pathlib import Path
 import pprint
+
 import numpy as np
+
+# (Optional) keep things sane on CPU-heavy machines
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+
+import open3d as o3d  # noqa: F401  (used indirectly via visualizer)
+from open3d.visualization import gui, rendering  # noqa: F401
 
 from reachy2_stack.core.client import ReachyClient, ReachyConfig
 from reachy2_stack.infra.world_model import WorldModel, WorldModelConfig
-
-
-def print_header(title: str) -> None:
-    print("\n" + "=" * 60)
-    print(title)
-    print("=" * 60)
+from reachy2_stack.perception.localization.hloc_localizer import HLocLocalizer
+from reachy2_stack.utils.utils_dataclass import HLocConfig
+from reachy2_stack.utils.utils_world_model import (
+    print_header,
+    pretty_mat,
+    visualize_world_model_in_mesh,
+)
 
 
 def main() -> None:
     # ------------------------------------------------------
-    # 1. Load config
+    # 1. Load configs
     # ------------------------------------------------------
-    print_header("1. Loading config")
-    cfg = ReachyConfig.from_yaml("config/config.yaml")
-    pprint.pprint(cfg)
+    print_header("1. Loading configs")
+
+    cfg_reachy = ReachyConfig.from_yaml("config/config.yaml")
+    pprint.pprint(cfg_reachy)
+
+    cfg_hloc = HLocConfig.from_yaml("config/config_hloc.yaml")
+    pprint.pprint(cfg_hloc)
+
+    # Use fused so that visual localization actually influences T_world_base
+    wm_cfg = WorldModelConfig(
+        location_name=cfg_hloc.location_name,
+        localization_mode="fused",  # "odom" / "vision" / "fused"
+    )
+    pprint.pprint(wm_cfg)
 
     # ------------------------------------------------------
     # 2. Connect to Reachy
     # ------------------------------------------------------
     print_header("2. Connecting to Reachy")
-    client = ReachyClient(cfg)
+    client = ReachyClient(cfg_reachy)
     client.connect()
-    print("Connected.")
+    print("Reachy connected.")
 
     # ------------------------------------------------------
-    # 3. Init WorldModel from client calib
+    # 3. Initialize WorldModel from Reachy calibration
     # ------------------------------------------------------
-    print_header("3. Initializing WorldModel from client calibration")
-
-    wm_cfg = WorldModelConfig(
-        location_name="default",
-        localization_mode="odom",  # for now we trust odom only
-    )
-    world = WorldModel(wm_cfg)
-
-    world.init_from_client_calib(client)
-    print("WorldModel camera calibration initialized.")
+    print_header("3. Initializing WorldModel from Reachy calibration")
+    world_model = WorldModel(wm_cfg)
+    world_model.init_from_client_calib(client)
+    print("WorldModel camera calibration loaded.")
 
     # ------------------------------------------------------
-    # 4. Update base pose from odometry
+    # 4. Update base pose from odometry (if available)
     # ------------------------------------------------------
-    print_header("4. Updating T_world_base from mobile odometry")
-
+    print_header("4. Updating base pose from mobile_base.odometry")
     odom = client.get_mobile_odometry()
-    print("Raw odometry dict:", odom)
-
-    if odom is not None:
-        world.update_from_odom(odom)
+    if odom is None:
+        print("[WARN] No mobile_base present on Reachy – leaving T_world_base as identity.")
     else:
-        print("No mobile_base present -> T_world_base stays identity.")
+        print("Raw odometry:", odom)
+        world_model.update_from_odom(odom)
 
-    T_world_base = world.get_T_world_base()
-    print("T_world_base:\n", T_world_base)
+    pretty_mat("T_world_base (world ← base) after odom", world_model.get_T_world_base())
 
     # ------------------------------------------------------
-    # 5. Set EE poses in base frame (left / right)
+    # 5. Run HLoc visual localization (depth-only for WorldModel)
     # ------------------------------------------------------
-    print_header("5. Setting EE poses from Reachy forward_kinematics")
+    print_header("5. Running HLoc visual localization (depth only for WorldModel)")
 
-    # direct SDK access is fine for now – later we can wrap this in ReachyClient
-    reachy = client.reachy
-    assert reachy is not None, "Client should hold a connected ReachySDK instance."
+    # Grab all camera streams once (teleop_left/right + depth)
+    # HLoc will localize all three, but WorldModel will only read 'depth'.
+    from reachy2_stack.utils.utils_dataclass import ReachyCameraData  # noqa: F401
 
-    # Right arm
+    cam_data = client.get_all_camera_data()
+
+    # Initialize HLoc localizer
+    localizer = HLocLocalizer(cfg_hloc)
+
+    # Build / reuse database structure
+    localizer.setup_database_structure()
+
+    # Run localization from the current Reachy images
+    loc_results = localizer.localize_from_reachy_camera_dataclass(cam_data)
+    print("\n[HLOC] Localization results keys:", list(loc_results.keys()))
+
+    # Feed ONLY the depth camera result into the world model
+    world_model.update_from_visual_localization_depth(
+        loc_results=loc_results,
+        alpha=1.0,  # 1.0 = trust vision fully, 0<alpha<1 = blend with odom
+    )
+
+    pretty_mat("T_world_base (world ← base) after depth visual fix",
+               world_model.get_T_world_base())
+
+    # ------------------------------------------------------
+    # 6. (Optional) Set EE poses from FK
+    # ------------------------------------------------------
+    print_header("6. Setting EE poses from Reachy FK (if available)")
     try:
-        T_base_ee_right = np.array(reachy.r_arm.forward_kinematics(), dtype=float)
-        world.set_T_base_ee_right(T_base_ee_right)
-        print("T_base_ee_right:\n", T_base_ee_right)
+        reachy = client.connect_reachy  # underlying SDK
+
+        # Right arm
+        if hasattr(reachy, "r_arm") and hasattr(reachy.r_arm, "forward_kinematics"):
+            q_r, _ = client.get_joint_state_right()
+            T_base_ee_r = np.array(reachy.r_arm.forward_kinematics(q_r), dtype=float)
+            world_model.set_T_base_ee("right", T_base_ee_r)
+            pretty_mat("T_base_ee_right (base ← ee)", T_base_ee_r)
+        else:
+            print("[INFO] Right arm FK not available, skipping.")
+
+        # Left arm
+        if hasattr(reachy, "l_arm") and hasattr(reachy.l_arm, "forward_kinematics"):
+            q_l, _ = client.get_joint_state_left()
+            T_base_ee_l = np.array(reachy.l_arm.forward_kinematics(q_l), dtype=float)
+            world_model.set_T_base_ee("left", T_base_ee_l)
+            pretty_mat("T_base_ee_left (base ← ee)", T_base_ee_l)
+        else:
+            print("[INFO] Left arm FK not available, skipping.")
+
     except Exception as e:
-        print("Could not get right arm FK:", e)
-        T_base_ee_right = None
-
-    # Left arm
-    try:
-        T_base_ee_left = np.array(reachy.l_arm.forward_kinematics(), dtype=float)
-        world.set_T_base_ee_left(T_base_ee_left)
-        print("T_base_ee_left:\n", T_base_ee_left)
-    except Exception as e:
-        print("Could not get left arm FK:", e)
-        T_base_ee_left = None
+        print(f"[WARN] Failed to set EE poses from FK: {e}")
 
     # ------------------------------------------------------
-    # 6. Query world-frame EE poses
+    # 7. Visualize in mesh
     # ------------------------------------------------------
-    print_header("6. Querying T_world_ee_left / T_world_ee_right")
-
-    T_world_ee_right = world.get_T_world_ee_right()
-    print("T_world_ee_right:\n", T_world_ee_right)
-
-    T_world_ee_left = world.get_T_world_ee_left()
-    print("T_world_ee_left:\n", T_world_ee_left)
-
-    # Also show generic helper for reference if we have FK
-    if T_base_ee_right is not None:
-        T_world_ee_right_generic = world.get_T_world_ee(T_base_ee_right)
-        print("T_world_ee_right (via generic helper):\n", T_world_ee_right_generic)
+    print_header("7. Launching visualizer")
+    mesh_path = Path(cfg_hloc.mesh_path)
+    visualize_world_model_in_mesh(mesh_path=mesh_path, world_model=world_model)
 
     # ------------------------------------------------------
-    # 7. Camera poses in world-frame
+    # 8. Clean shutdown (after GUI closes)
     # ------------------------------------------------------
-    print_header("7. Camera poses in world frame")
-
-    for cam_id in ["teleop_left", "teleop_right", "depth_rgb"]:
-        T_world_cam = world.get_T_world_cam(cam_id)
-        print(f"{cam_id} -> T_world_cam:\n{T_world_cam}")
-
-    # ------------------------------------------------------
-    # 8. Camera intrinsics + image sizes
-    # ------------------------------------------------------
-    print_header("8. Camera intrinsics + image sizes")
-
-    for cam_id in ["teleop_left", "teleop_right", "depth_rgb"]:
-        K = world.get_intrinsics(cam_id)
-        hw = world.get_image_size(cam_id)
-        print(f"{cam_id}:")
-        print("  K:\n", K)
-        print("  (height, width):", hw)
-
-    # ------------------------------------------------------
-    # 9. Done
-    # ------------------------------------------------------
-    print_header("DONE - WorldModel SE(3) + calibration pipeline looks wired up.")
+    print_header("8. Closing Reachy client")
+    client.close()
+    print("Done.")
 
 
 if __name__ == "__main__":
