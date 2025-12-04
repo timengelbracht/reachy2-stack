@@ -83,13 +83,14 @@ class ArticulatedObjectInstance:
     articulation_type: str        # e.g. "revolute", "prismatic"
     articulation_axis: np.ndarray     # (3,) - estimated axis of rotation/translation
     handle_longest_axis: np.ndarray  # (3,) - estimated longest axis of handle
+    trajectory: np.ndarray           # (K, 3) - recorded trajectory of handle positions
 
     # state variables
     open_fraction: float = 0.0               # 0=closed, 1=open
     is_open: bool = False
     last_handle_position_world: Optional[np.ndarray] = None
     last_update_time: float = field(default_factory=lambda: 0.0)
-    
+
 @dataclass
 class ArticulatedClassConfig:
     """
@@ -184,3 +185,50 @@ class HLocConfig:
         with open(path, "r") as f:
             data = yaml.safe_load(f)
         return cls(**data)
+    
+@dataclass
+class WorldCameraState:
+    """
+    Pose + intrinsics for one camera.
+
+    Conventions:
+      - T_world_cam : 4x4 transform from camera to world   (world ← cam)
+      - T_base_cam  : 4x4 transform from camera to base    (base  ← cam)
+    """
+    camera_id: str
+    T_world_cam: np.ndarray
+    T_base_cam: np.ndarray
+    K: np.ndarray
+    image_size: Tuple[int, int]  # (H, W)
+
+
+@dataclass
+class WorldEEState:
+    """
+    Pose for one end-effector.
+
+    Conventions:
+      - T_world_ee : 4x4 transform from EE to world   (world ← ee)
+      - T_base_ee  : 4x4 transform from EE to base    (base  ← ee)
+    """
+    side: str  # "left" or "right"
+    T_world_ee: Optional[np.ndarray]
+    T_base_ee: Optional[np.ndarray]
+
+
+@dataclass
+class WorldState:
+    """
+    Read-only snapshot of the kinematic state the WorldModel maintains.
+    No semantics, no articulation states – just geometry.
+    """
+    location_name: str
+
+    # Base pose
+    T_world_base: np.ndarray       # world ← base (current estimate)
+    T_world_base_odom: np.ndarray  # world ← base (pure odom)
+
+    # Cameras & end-effectors
+    cameras: Dict[str, WorldCameraState]
+    end_effectors: Dict[str, WorldEEState]
+    
