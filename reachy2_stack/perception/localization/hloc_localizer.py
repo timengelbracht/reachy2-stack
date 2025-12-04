@@ -156,9 +156,14 @@ def pose_from_cluster_patched(
         )
 
     opts = pycolmap.AbsolutePoseEstimationOptions()
+    opts.estimate_focal_length = True
+    
     opts.ransac.max_error = 48
+    ref_opts = pycolmap.AbsolutePoseRefinementOptions()
+    ref_opts.refine_focal_length = True
+    ref_opts.refine_extra_params = True
     ret = pycolmap.estimate_and_refine_absolute_pose(
-        all_mkpq, all_mkp3d, cfg, opts
+        all_mkpq, all_mkp3d, cfg, opts, ref_opts
     )
 
     # Guard: nothing survived matching/skip -> return safe failure with identity pose

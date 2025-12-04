@@ -365,6 +365,7 @@ class SemanticMapBuilder:
         articulation_type_arr = data.get("articulation_type", None)
         articulation_axis_arr = data.get("articulation_axis", None)
         handle_longest_axis_arr = data.get("handle_longest_axis", None)
+        trajectory_arr = data.get("articulation_trajectory", None)
 
         # synamic states
         open_fraction_arr = data.get("open_fraction", None)
@@ -431,6 +432,10 @@ class SemanticMapBuilder:
                 last_update_time = float(last_update_time_arr[i])
             else:
                 last_update_time = 0.0
+            if trajectory_arr is not None:
+                trajectory = np.asarray(trajectory_arr[i], dtype=float)
+            else:
+                trajectory = np.full((20, 3), np.nan, dtype=float)
                 
             instances.append(
                 ArticulatedObjectInstance(
@@ -453,8 +458,11 @@ class SemanticMapBuilder:
                     is_open=is_open,
                     last_handle_position_world=last_handle_pos,
                     last_update_time=last_update_time,
+                    trajectory=trajectory,
                 )
             )
+
+        self.instances = instances
 
         return instances
 
