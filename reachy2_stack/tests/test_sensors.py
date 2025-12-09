@@ -158,12 +158,6 @@ def main() -> None:
     T_default = client.get_depth_extrinsics()
     print("Depth extrinsics (default) R:\n", T_default)
 
-    T_left = client.get_depth_extrinsics(CameraView.LEFT)
-    print("Depth extrinsics (LEFT view) R:\n", T_left)
-
-    T_right = client.get_depth_extrinsics(CameraView.RIGHT)
-    print("Depth extrinsics (RIGHT view) R:\n", T_right)
-
     # ------------------------------------------------------
     # 12. Done
     # ------------------------------------------------------
