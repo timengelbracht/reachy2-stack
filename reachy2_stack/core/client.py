@@ -732,6 +732,16 @@ class ReachyClient:
             "send_ee_delta requires composing with current EE pose. "
             "Use ArmController.goto_pose_base/world instead."
         )
+    def send_goal_positions(self, check_positions: bool = False) -> None:
+        """Send the goal positions to the robot.
+
+        If goal positions have been specified for any joint of the robot, sends them to the robot.
+
+        Args :
+            check_positions: A boolean indicating whether to check the positions after sending the command.
+                Defaults to True.
+        """
+        self.reachy.send_goal_positions(check_positions=check_positions)
 
     def execute_skill(self, name: str, **kwargs) -> None:
         """Call a named skill implemented in reachy2_stack.skills."""
