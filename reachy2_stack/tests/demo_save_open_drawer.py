@@ -12,8 +12,9 @@ from reachy2_stack.control.arm import ArmController  # adjust import if needed
 
 
 # --- CONFIG -------------------------------------------------------------------
-HOST = "192.168.1.71"   # <- change to your Reachy IP
-SIDE = "right"          # "left" or "right"
+HOST = "192.168.1.71"
+SAVE_PATH = "/exchange/dummy_arm_traj.npz"
+
 # ------------------------------------------------------------------------------
 
 
@@ -46,7 +47,7 @@ def main() -> None:
     ]
 
     sampling_frequency = 100  # in Hz
-    record_duration = 10  # in sec.
+    record_duration = 30  # in sec.
 
     trajectories = []
 
@@ -56,6 +57,9 @@ def main() -> None:
         current_point = [joint.present_position for joint in recorded_joints]
         
         trajectories.append(current_point)
+        traj = np.array(trajectories, dtype=float)   # shape (T, 14)
+        np.savez(SAVE_PATH, traj=traj, hz=float(sampling_frequency))
+
 
         time.sleep(1 / sampling_frequency)
 
@@ -75,21 +79,23 @@ def main() -> None:
     print("done. will sleep now")
 
 
-    time.sleep(5)
+    time.sleep(50)
+    data = np.load(SAVE_PATH)
+    traj = data["traj"]              # (T, 14)
+    hz = float(data["hz"])           # original sampling frequency
+    dt = 1.0 / hz
+
     right_arm.turn_on()
     left_arm.turn_on()
 
-   
-    for joints_positions in trajectories:
-        for joint, pos in zip(recorded_joints, joints_positions):
-            joint.goal_position = pos
+    for q in traj:
+        for joint, pos in zip(recorded_joints, q):
+            joint.goal_position = float(pos)
         client.send_goal_positions(check_positions=False)
-        time.sleep(1 / sampling_frequency)
+        time.sleep(dt)
 
     right_arm.turn_off_smoothly()
     left_arm.turn_off_smoothly()
-    client.close()
-
 
 if __name__ == "__main__":
     main()
