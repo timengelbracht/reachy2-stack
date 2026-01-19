@@ -34,6 +34,9 @@ def main() -> None:
     reachy.mobile_base.turn_off()
     #turn on the drivers. Warning, do not be close to the robot or try to move it/ its arms
     client.turn_on_all()
+    for i in range (50):
+        client.goto_base_defined_speed(0.6,0.0,0.0)
+        time.sleep(0.1)
 
     client.goto_head([0.0,0.0,-45.0],2,False,interpolation_mode = 'minimum_jerk',degrees=True)
 

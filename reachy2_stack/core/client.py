@@ -286,6 +286,23 @@ class ReachyClient:
             interpolation_space=interpolation_space,
             **cartesian_kwargs,
         )
+    def goto_base_defined_speed(self,
+                                vx: float | int = 0,	
+                                vy: float | int = 0,	
+                                vtheta: float | int = 0
+                                ):
+        """sets a target base speed and maitains that speed for 200 ms. A sleep time of 0.1 second is necessary
+        between two consecutive commands.
+        
+        Args:
+            vx: velocity on x in m/s.
+            vy: velocity on y in m/s.
+            vtheta: yaw angular velocity in deg/s.
+        """
+        
+        self.reachy._mobile_base.set_goal_speed(vx=vx, vy=vy, vtheta=vtheta)
+        return self.reachy._mobile_base.send_speed_command() 
+
     
     def goto_head(
             self,	
