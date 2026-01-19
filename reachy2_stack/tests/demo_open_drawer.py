@@ -16,9 +16,6 @@ from reachy2_stack.control.base import BaseController
 # --- CONFIG -------------------------------------------------------------------
 HOST = "192.168.1.71"
 SAVE_PATH = "/exchange/arm_traj.npz"
-SAVE_PATH_2 = "/exchange/closing_arm_traj.npz"
-
-
 # ------------------------------------------------------------------------------
 
 
@@ -27,8 +24,10 @@ def main() -> None:
     client = ReachyClient(cfg)
     client.connect()
     reachy = client.connect_reachy
-    base = BaseController(client=client, world=None)
 
+    #initialize the base controller
+    base = BaseController(client=client, world=None)
+    #turn on the drivers. Warning, do not be close to the robot or try to move it/ its arms
     client.turn_on_all()
 
     
@@ -36,7 +35,7 @@ def main() -> None:
     left_arm = client._get_arm("left")
     
 
-
+    # Arm joints that can be actuated
     recorded_joints = [
     right_arm._shoulder.pitch,
     right_arm._shoulder.roll,
@@ -55,8 +54,7 @@ def main() -> None:
     left_arm._wrist.yaw,
     ]
 
-    
-  
+    # we reset the odometry to always work in base frame
     base.reset_odometry()
     with open("/exchange/first_base_odom.json", "r") as f:
         pose = json.load(f)
@@ -71,25 +69,25 @@ def main() -> None:
                                 timeout=6.0,
                 )
         
-    time.sleep(5)
+    time.sleep(1)
 
+    #load arm movements
     data = np.load(SAVE_PATH)
-    traj = data["traj"]              # (T, 14)
-    hz = float(data["hz"])           # original sampling frequency
+    traj = data["traj"]             
+    hz = float(data["hz"])          
     dt = 1.0 / hz
 
-
+    # move the arm
     for q in traj:
         for joint, pos in zip(recorded_joints, q):
             joint.goal_position = float(pos)
         client.send_goal_positions(check_positions=False)
         time.sleep(dt)
 
-    
+    time.sleep(1)
 
-    
+    # reset the base and move it back a bit to open the drawer
 
-    time.sleep(5)
     base.reset_odometry()
     with open("/exchange/mid_base_odom.json", "r") as f:
         pose = json.load(f)
@@ -103,10 +101,9 @@ def main() -> None:
                                 timeout=5.0,
                 )
     
-    time.sleep(5)
+    time.sleep(1)
 
-
-
+    # go back to the original place
 
     with open("/exchange/final_base_odom.json", "r") as f:
         pose = json.load(f)
@@ -120,15 +117,14 @@ def main() -> None:
                                 timeout=5.0,
                 )
     
-
-   
-
+    # remove the arm
     for q in traj[::-1]:
         for joint, pos in zip(recorded_joints, q):
             joint.goal_position = float(pos)
         client.send_goal_positions(check_positions=False)
         time.sleep(dt)
 
+    # turn off everything
     
     right_arm.turn_off_smoothly()
     left_arm.turn_off_smoothly()
