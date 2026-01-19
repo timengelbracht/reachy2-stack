@@ -286,6 +286,31 @@ class ReachyClient:
             interpolation_space=interpolation_space,
             **cartesian_kwargs,
         )
+    
+    def goto_head(
+            self,	
+            target: Any,	
+            duration: float = 2.0,	
+            wait: bool = False,	
+            interpolation_mode: str = 'minimum_jerk',
+            degrees: bool = True):
+        """go to a certain head pose.
+
+        Args:
+            target: a list [roll, pitch, yaw].
+            duration: the movement duration in seconds.
+            duration: movement duration in seconds.
+            wait: if True, block until the movement is complete.
+            interpolation_mode: 'minimum_jerk', 'linear', 'elliptical' (cartesian only).
+            degrees: if True, reads target values in degrees, otherwise in radians.
+            
+        """
+        return self.reachy._head.goto(target=target,	
+            duration=duration,	
+            wait=wait,	
+            interpolation_mode = interpolation_mode,
+            degrees=degrees)
+
 
     # --- arm kinematics (NEW) ---
 

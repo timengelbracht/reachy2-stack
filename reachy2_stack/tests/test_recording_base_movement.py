@@ -11,7 +11,7 @@ from reachy2_stack.control.base import BaseController  # adjust import if needed
 
 # --- CONFIG -------------------------------------------------------------------
 HOST = "192.168.1.71"   # <- change to your Reachy IP
-SAVE_PATH = "/exchange/final_base_odom.json"
+SAVE_PATH = "/exchange/reposition_base_odom.json"
 # ------------------------------------------------------------------------------
 
 
@@ -64,21 +64,21 @@ def main() -> None:
             json.dump(pose, f, indent=2)
 
         print(f"[BASE] Final odometry saved to {SAVE_PATH}")
-        print(pose)
-        print(client.get_mobile_odometry())
+        # print(pose)
+        # print(client.get_mobile_odometry())
                 
-        base.goto_odom(
-                                x=float(pose["x"]),
-                                y=float(pose["y"]),
-                                theta=float(pose["theta"]),
-                                wait=True,
-                                distance_tolerance=0.01,
-                                angle_tolerance=0.5,
-                                timeout=30.0,
-                )
+        # base.goto_odom(
+        #                         x=float(pose["x"]),
+        #                         y=float(pose["y"]),
+        #                         theta=float(pose["theta"]),
+        #                         wait=True,
+        #                         distance_tolerance=0.01,
+        #                         angle_tolerance=0.5,
+        #                         timeout=30.0,
+        #         )
         
-        print("ended playing")
-        print(client.get_mobile_odometry())
+        # print("ended playing")
+        # print(client.get_mobile_odometry())
 
 
 

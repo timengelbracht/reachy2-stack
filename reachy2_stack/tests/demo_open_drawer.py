@@ -27,13 +27,15 @@ def main() -> None:
 
     #initialize the base controller
     base = BaseController(client=client, world=None)
+    right_arm = client._get_arm("right")
+    left_arm = client._get_arm("left")
+    right_arm.turn_off_smoothly()
+    left_arm.turn_off_smoothly()
+    reachy.mobile_base.turn_off()
     #turn on the drivers. Warning, do not be close to the robot or try to move it/ its arms
     client.turn_on_all()
 
-    
-    right_arm = client._get_arm("right")
-    left_arm = client._get_arm("left")
-    
+    client.goto_head([0.0,0.0,-45.0],2,False,interpolation_mode = 'minimum_jerk',degrees=True)
 
     # Arm joints that can be actuated
     recorded_joints = [
@@ -124,8 +126,28 @@ def main() -> None:
         client.send_goal_positions(check_positions=False)
         time.sleep(dt)
 
-    # turn off everything
+    time.sleep(1)
+
+    client.goto_head([0.0,0.0,0.0],2,False,interpolation_mode = 'minimum_jerk',degrees=True)
+
+    time.sleep(1)
+
+    base.reset_odometry()
+    with open("/exchange/reposition_base_odom.json", "r") as f:
+        pose = json.load(f)
+    base.goto_odom(
+                                x=float(pose["x"]),
+                                y=float(pose["y"]),
+                                theta=float(pose["theta"]),
+                                wait=True,
+                                distance_tolerance=0.01,
+                                angle_tolerance=0.5,
+                                timeout=5.0,
+                )
     
+
+    # turn off everything
+
     right_arm.turn_off_smoothly()
     left_arm.turn_off_smoothly()
     reachy.mobile_base.turn_off()
