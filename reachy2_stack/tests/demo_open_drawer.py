@@ -154,6 +154,7 @@ def main() -> None:
     right_arm.turn_off_smoothly()
     left_arm.turn_off_smoothly()
     reachy.mobile_base.turn_off()
+    client.close()
 
 if __name__ == "__main__":
     main()

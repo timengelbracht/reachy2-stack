@@ -60,6 +60,7 @@ def main() -> None:
     # turn everything off 
 
     reachy.mobile_base.turn_off()
+    client.close()
 
 if __name__ == "__main__":
     main()
