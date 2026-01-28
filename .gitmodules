@@ -1,3 +1,6 @@
 [submodule "third_party/hloc"]
 	path = third_party/hloc
 	url = https://github.com/cvg/Hierarchical-Localization.git
+[submodule "third_party/robot_in_o3d"]
+	path = third_party/robot_in_o3d
+	url = git@github.com:BoySun045/robot_in_o3d.git

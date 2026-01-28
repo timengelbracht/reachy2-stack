@@ -112,3 +112,12 @@ class ArmController:
             wait=wait,
             **kwargs,
         )
+    
+    def goto_pose_base_with_base_assist(
+    self,
+    T_base_ee: np.ndarray,
+    ) -> bool:
+        return self.client.goto_ee_pose_base_with_base_assist(side=self.side, T_base_ee=T_base_ee)
+    
+    
+
