@@ -24,11 +24,14 @@
     "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
   ],
   "runArgs": [
-    "--privileged",                
+    "--privileged",
+    "--gpus=all",                  
     "--group-add=plugdev",
-    "--group-add=video",   
+    "--group-add=video",
     "--env=DISPLAY",               
-    "--env=QT_X11_NO_MITSHM=1"
+    "--env=QT_X11_NO_MITSHM=1",     
+    "--env=NVIDIA_DRIVER_CAPABILITIES=all",
+    "--env=NVIDIA_VISIBLE_DEVICES=all"
   ],
   "remoteUser": "root",
   "workspaceFolder": "/exchange",
