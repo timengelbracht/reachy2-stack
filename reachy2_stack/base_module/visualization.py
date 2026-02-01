@@ -52,7 +52,6 @@ def open3d_vis_loop(
     # This ensures Open3D can properly update it later
     pointcloud_geom = None
     if show_pointcloud:
-        print("creating pointcloud geometry")
         pointcloud_geom = o3d.geometry.PointCloud()
         # Add a dummy point at origin so geometry is not empty
         pointcloud_geom.points = o3d.utility.Vector3dVector(np.array([[0, 0, 0]]))
@@ -98,7 +97,6 @@ def open3d_vis_loop(
     if show_trajectory:
         vis.add_geometry(trajectory_line)
     if show_pointcloud and pointcloud_geom is not None:
-        print("showing pointcloud")
         vis.add_geometry(pointcloud_geom)
 
     # Set up view with better initial position
@@ -187,10 +185,8 @@ def open3d_vis_loop(
 
         # Update point cloud
         if show_pointcloud and pointcloud_geom is not None:
-            print("updating pointcloud")
             pcd_world = odom_state.get_pointcloud()
             if pcd_world is not None and len(pcd_world.points) > 0:
-                print(f"  Point cloud has {len(pcd_world.points)} points")
                 pointcloud_geom.points = pcd_world.points
                 pointcloud_geom.colors = pcd_world.colors
 

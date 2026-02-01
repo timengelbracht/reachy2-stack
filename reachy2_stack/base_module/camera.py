@@ -143,9 +143,9 @@ def camera_loop(
 
                 # Generate point cloud from RGBD
                 if generate_pointcloud and odom_state is not None and intrinsics is not None:
-                    pcd_count += 1
                     if pcd_count % pcd_every_n == 0:
                         try:
+                            print(f"[CAM] Generating point cloud (frame {pcd_count})...")
                             # Get RGB and depth frames
                             rgb_frame, _ = reachy.cameras.depth.get_frame()
                             depth_frame, _ = reachy.cameras.depth.get_depth_frame()
@@ -163,11 +163,19 @@ def camera_loop(
                                 depth_trunc=depth_trunc,
                             )
 
+                            print(f"[CAM]   Point cloud generated with {len(pcd_camera.points)} points")
+
                             # Update odometry state with new point cloud
                             odom_state.update_pointcloud(pcd_camera)
+                            print(f"[CAM]   Point cloud updated in odometry state")
 
                         except Exception as e:
                             print(f"[CAM] point cloud generation error: {e}")
+                            import traceback
+                            traceback.print_exc()
+
+                    # Increment counter after processing
+                    pcd_count += 1
 
             except Exception as e:
                 print(f"[CAM] grab error: {e}")

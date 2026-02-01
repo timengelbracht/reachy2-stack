@@ -46,8 +46,8 @@ COORD_FRAME_SIZE = 1  # Size of coordinate frame axes
 
 # Point cloud generation
 GENERATE_POINTCLOUD = True  # Generate point clouds from RGBD
-PCD_EVERY_N = 30  # Generate point cloud every N frames (30 frames ~ 1.5 sec at 20 FPS)
-DEPTH_SCALE = 1.0  # Scale factor for depth (1.0 if already in meters, 0.001 if in mm)
+PCD_EVERY_N = 5  # Generate point cloud every N frames (30 frames ~ 1.5 sec at 20 FPS)
+DEPTH_SCALE = 0.001  # Scale factor for depth (1.0 if already in meters, 0.001 if in mm)
 DEPTH_TRUNC = 3.5  # Maximum depth in meters to include in point cloud
 # --------------------------------------
 
