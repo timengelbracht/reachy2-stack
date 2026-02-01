@@ -989,19 +989,12 @@ class ReachyClient:
         T = self.reachy.cameras.teleop.get_extrinsics(CameraView.RIGHT)
         return np.linalg.inv(np.asarray(T, dtype=float))
 
-    def get_depth_intrinsics(self, view: Optional[CameraView] = None) -> Dict[str, Any]:
+    def get_depth_intrinsics(self) -> Dict[str, Any]:
         """Return intrinsics for depth camera (RGB or DEPTH view)."""
         # self.connect()
         assert self.reachy is not None
 
-        if view is None:
-            args = ()
-        else:
-            args = (view,)
-
-        h, w, distortion_model, D, K, R, P = self.reachy.cameras.depth.get_parameters(
-            *args
-        )
+        h, w, distortion_model, D, K, R, P = self.reachy.cameras.depth.get_parameters()
         return {
             "height": h,
             "width": w,

@@ -40,8 +40,15 @@ DEPTH_PERCENTILE_RANGE = (1, 99)  # Percentile range for normalization (1st to 9
 VIS_UPDATE_HZ = 10  # Update rate for 3D visualization
 SHOW_TRAJECTORY = True  # Show odometry trail
 SHOW_CAMERA = True  # Show camera coordinate frame
+SHOW_POINTCLOUD = True  # Show point cloud from RGBD
 MAX_TRAIL_POINTS = 500  # Maximum trajectory points to keep
 COORD_FRAME_SIZE = 1  # Size of coordinate frame axes
+
+# Point cloud generation
+GENERATE_POINTCLOUD = True  # Generate point clouds from RGBD
+PCD_EVERY_N = 30  # Generate point cloud every N frames (30 frames ~ 1.5 sec at 20 FPS)
+DEPTH_SCALE = 1.0  # Scale factor for depth (1.0 if already in meters, 0.001 if in mm)
+DEPTH_TRUNC = 3.5  # Maximum depth in meters to include in point cloud
 # --------------------------------------
 
 
@@ -75,6 +82,12 @@ def main() -> None:
             "depth_minmax": DEPTH_MINMAX,
             "depth_normalize_percentile": DEPTH_NORMALIZE_PERCENTILE,
             "depth_percentile_range": DEPTH_PERCENTILE_RANGE,
+            "odom_state": odom_state,
+            "generate_pointcloud": GENERATE_POINTCLOUD,
+            "pcd_every_n": PCD_EVERY_N,
+            "depth_scale": DEPTH_SCALE,
+            "depth_trunc": DEPTH_TRUNC,
+            "client": client,
         },
         daemon=True,
     )
@@ -109,6 +122,7 @@ def main() -> None:
             vis_update_hz=VIS_UPDATE_HZ,
             show_trajectory=SHOW_TRAJECTORY,
             show_camera=SHOW_CAMERA,
+            show_pointcloud=SHOW_POINTCLOUD,
             coord_frame_size=COORD_FRAME_SIZE,
         )
 
