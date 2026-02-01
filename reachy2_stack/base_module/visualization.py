@@ -106,8 +106,8 @@ def open3d_vis_loop(
     ctr.change_field_of_view(step=20.0)  # Increase FOV
 
     # Set a nice initial viewpoint (top-down angled view)
-    ctr.set_zoom(0.05)  # Zoom out much more for wider view
-    ctr.set_front([0.3, 0.3, -0.9])  # Looking down at an angle
+    ctr.set_zoom(0.1)  # Zoom out much more for wider view
+    ctr.set_front([0.3, 0.3, 0.9])  # Looking down at an angle
     ctr.set_lookat([0, 0, 0])  # Look at origin
     ctr.set_up([0, 0, 1])  # Z is up
 

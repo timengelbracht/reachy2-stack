@@ -1,10 +1,23 @@
 #!/usr/bin/env python3
-"""Clean test script for camera, base movement, and odometry visualization."""
+"""Test script for client-server mapping architecture.
+
+This demonstrates the client-server setup where:
+1. Client runs on the robot (this script)
+2. Server runs separately (wavemap_server.py) for volumetric mapping
+
+Usage:
+    # Terminal 1: Start the wavemap server
+    python -m reachy2_stack.base_module.wavemap_server --port 5555
+
+    # Terminal 2: Run the client (this script)
+    python reachy2_stack/tests/module_test_client_server.py
+"""
 
 import time
 import threading
 import cv2
 
+from reachy2_stack.tests.module_test import DEPTH_SCALE, DEPTH_TRUNC
 from reachy2_stack.utils.utils_dataclass import ReachyConfig
 from reachy2_stack.core.client import ReachyClient
 from reachy2_stack.base_module import (
@@ -15,6 +28,7 @@ from reachy2_stack.base_module import (
     OdometryState,
     open3d_vis_loop,
     mapping_loop,
+    mapping_loop_client,  # Client-server mapping
 )
 
 # ---------------- CONFIG ----------------
@@ -31,28 +45,29 @@ RENDER_FPS = 20
 GRAB_EVERY_N = 1
 SHOW_RGB = True  # Show RGB camera feed from depth camera
 SHOW_DEPTH = True  # Show depth camera feed
-SHOW_TELEOP = True  # Show teleop stereo cameras (left + right)
-GRAB_TELEOP_EVERY_N = 1  # Grab teleop frames every N iterations (0 = disabled)
+SHOW_TELEOP = True  # Show teleop stereo cameras (disabled for server mode)
+GRAB_TELEOP_EVERY_N = 1  # Disabled
 
 # Depth display
-DEPTH_COLORMAP = cv2.COLORMAP_JET  # Options: COLORMAP_JET, COLORMAP_VIRIDIS, COLORMAP_HOT, etc.
-DEPTH_MINMAX = None  # e.g., (300, 3000) for depth in mm; None = auto-scale
-DEPTH_NORMALIZE_PERCENTILE = True  # If True, use percentile normalization (clips outliers for better visibility)
-DEPTH_PERCENTILE_RANGE = (15, 85)  # Percentile range for normalization (1st to 99th percentile)
+DEPTH_COLORMAP = cv2.COLORMAP_JET
+DEPTH_MINMAX = None
+DEPTH_NORMALIZE_PERCENTILE = True
+DEPTH_PERCENTILE_RANGE = (15, 85)
 
 # Open3D visualization
 VIS_UPDATE_HZ = 10  # Update rate for 3D visualization
 SHOW_TRAJECTORY = True  # Show odometry trail
 SHOW_CAMERA = True  # Show camera coordinate frame
-SHOW_POINTCLOUD = True  # Show point cloud from RGBD
+SHOW_POINTCLOUD = True  # Show point cloud from wavemap server
 MAX_TRAIL_POINTS = 500  # Maximum trajectory points to keep
 COORD_FRAME_SIZE = 1  # Size of coordinate frame axes
 
-# 3D Mapping (RGBD to point cloud)
-ENABLE_MAPPING = True  # Enable 3D mapping from RGBD
-MAPPING_HZ = 2.0  # Point cloud generation rate in Hz (lower = less CPU)
-DEPTH_SCALE = 0.001  # Scale factor for depth (1.0 if already in meters, 0.001 if in mm)
-DEPTH_TRUNC = 3.5  # Maximum depth in meters to include in point cloud
+# Client-server mapping
+MAPPING_SERVER_HOST = "localhost"  # Change to server IP if on different machine
+MAPPING_SERVER_PORT = 5555
+MAPPING_HZ = 2.0  # Request rate in Hz
+MAPPING_TIMEOUT_MS = 5000  # ZeroMQ timeout in milliseconds
+MAPPING_DEPTH_SCALE = 0.001  # Depth scale (0.001 = mm to meters)
 # --------------------------------------
 
 
@@ -95,16 +110,20 @@ def main() -> None:
         daemon=True,
     )
 
+    # Client-server mapping thread (intrinsics come from cam_state, set by camera_loop)
     mapping_thread = threading.Thread(
-        target=mapping_loop,
-        args=(cam_state, odom_state, stop_evt, client),
+        target=mapping_loop_client,
+        args=(cam_state, odom_state, stop_evt),
         kwargs={
+            "server_host": MAPPING_SERVER_HOST,
+            "server_port": MAPPING_SERVER_PORT,
             "mapping_hz": MAPPING_HZ,
-            "depth_scale": DEPTH_SCALE,
-            "depth_trunc": DEPTH_TRUNC,
+            "timeout_ms": MAPPING_TIMEOUT_MS,
+            "depth_scale": MAPPING_DEPTH_SCALE,
         },
         daemon=True,
-    ) if ENABLE_MAPPING else None
+    )
+
 
     teleop_thread = threading.Thread(
         target=teleop_loop,
@@ -125,11 +144,18 @@ def main() -> None:
     )
 
     try:
+        print("\n" + "=" * 60)
+        print("CLIENT-SERVER MAPPING TEST")
+        print("=" * 60)
+        print(f"Wavemap server: {MAPPING_SERVER_HOST}:{MAPPING_SERVER_PORT}")
+        print(f"Mapping rate: {MAPPING_HZ} Hz")
+        print(f"Timeout: {MAPPING_TIMEOUT_MS} ms")
+        print("=" * 60 + "\n")
+
         cam_thread.start()
         teleop_thread.start()
         odom_thread.start()
-        if mapping_thread is not None:
-            mapping_thread.start()
+        mapping_thread.start()
 
         # Run Open3D in main thread (blocking until window closes or ESC pressed)
         open3d_vis_loop(
@@ -147,8 +173,7 @@ def main() -> None:
         cam_thread.join(timeout=2.0)
         teleop_thread.join(timeout=2.0)
         odom_thread.join(timeout=2.0)
-        if mapping_thread is not None:
-            mapping_thread.join(timeout=2.0)
+        mapping_thread.join(timeout=2.0)
         try:
             client.goto_base_defined_speed(0.0, 0.0, 0.0)
             reachy.mobile_base.turn_off()
