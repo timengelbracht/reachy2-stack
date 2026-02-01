@@ -12,6 +12,18 @@ from pydualsense import pydualsense
 from reachy2_stack.utils.utils_dataclass import ReachyConfig
 from reachy2_stack.core.client import ReachyClient
 
+####################installation requirements###########################
+
+# sudo cp 70-ps5-controller.rules /etc/udev/rules.d
+# sudo udevadm control --reload-rules
+# sudo udevadm trigger
+
+# sudo apt install libhidapi-dev
+
+# pip install --upgrade pydualsense
+
+# checkout https://github.com/flok/pydualsense
+
 # ---------------- CONFIG ----------------
 HOST = "192.168.1.71"
 
