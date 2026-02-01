@@ -45,16 +45,6 @@ def rgbd_to_pointcloud(
     o3d_rgb = o3d.geometry.Image(rgb_image.astype(np.uint8))
     o3d_depth = o3d.geometry.Image((depth * depth_scale).astype(np.float32))
 
-    print("depth scale:", depth_scale)
-    # get min max of o3d_depth for debugging
-    depth_np = np.asarray(o3d_depth)
-    depth_valid = depth_np[depth_np > 0]
-    if len(depth_valid) > 0:
-        depth_min, depth_max = depth_valid.min(), depth_valid.max()
-        depth_mean = depth_valid.mean()
-        print(f"[PCD]   Depth range: min={depth_min:.2f}, max={depth_max:.2f}, mean={depth_mean:.2f}")
-    else:
-        print(f"[PCD]   WARNING: No valid depth values!")
     # Create RGBD image
     rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
         o3d_rgb,
@@ -66,7 +56,6 @@ def rgbd_to_pointcloud(
 
     # Get intrinsics
     K = intrinsics.get("K", np.eye(3))
-    print("Camera Intrinsics K:\n", K)
     width = intrinsics.get("width", rgb.shape[1])
     height = intrinsics.get("height", rgb.shape[0])
 
@@ -82,7 +71,6 @@ def rgbd_to_pointcloud(
 
     # Create point cloud
     pcd = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd, o3d_intrinsic)
-    print(f"Generated point cloud with {len(pcd.points)} points")
 
     return pcd
 
