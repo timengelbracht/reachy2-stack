@@ -9,10 +9,12 @@ from reachy2_stack.utils.utils_dataclass import ReachyConfig
 from reachy2_stack.core.client import ReachyClient
 from reachy2_stack.base_module import (
     camera_loop,
+    CameraState,
     teleop_loop,
     odometry_loop,
-    open3d_vis_loop,
     OdometryState,
+    open3d_vis_loop,
+    mapping_loop,
 )
 
 # ---------------- CONFIG ----------------
@@ -27,8 +29,10 @@ WZ = 110.0
 # Camera rendering (using OpenCV - compatible with Open3D)
 RENDER_FPS = 20
 GRAB_EVERY_N = 1
-SHOW_RGB = True  # Show RGB camera feed
+SHOW_RGB = True  # Show RGB camera feed from depth camera
 SHOW_DEPTH = True  # Show depth camera feed
+SHOW_TELEOP = True  # Show teleop stereo cameras (left + right)
+GRAB_TELEOP_EVERY_N = 1  # Grab teleop frames every N iterations (0 = disabled)
 
 # Depth display
 DEPTH_COLORMAP = cv2.COLORMAP_JET  # Options: COLORMAP_JET, COLORMAP_VIRIDIS, COLORMAP_HOT, etc.
@@ -44,9 +48,9 @@ SHOW_POINTCLOUD = True  # Show point cloud from RGBD
 MAX_TRAIL_POINTS = 500  # Maximum trajectory points to keep
 COORD_FRAME_SIZE = 1  # Size of coordinate frame axes
 
-# Point cloud generation
-GENERATE_POINTCLOUD = True  # Generate point clouds from RGBD
-PCD_EVERY_N = 5  # Generate point cloud every N frames (30 frames ~ 1.5 sec at 20 FPS)
+# 3D Mapping (RGBD to point cloud)
+ENABLE_MAPPING = True  # Enable 3D mapping from RGBD
+MAPPING_HZ = 2.0  # Point cloud generation rate in Hz (lower = less CPU)
 DEPTH_SCALE = 0.001  # Scale factor for depth (1.0 if already in meters, 0.001 if in mm)
 DEPTH_TRUNC = 3.5  # Maximum depth in meters to include in point cloud
 # --------------------------------------
@@ -69,28 +73,38 @@ def main() -> None:
     stop_evt = threading.Event()
     odom_state = OdometryState(max_trail_points=MAX_TRAIL_POINTS)
 
+    cam_state = CameraState()
+
     # Start threads
     cam_thread = threading.Thread(
         target=camera_loop,
-        args=(reachy, stop_evt),
+        args=(reachy, cam_state, stop_evt),
         kwargs={
             "show_rgb": SHOW_RGB,
             "show_depth": SHOW_DEPTH,
+            "show_teleop": SHOW_TELEOP,
             "render_fps": RENDER_FPS,
             "grab_every_n": GRAB_EVERY_N,
+            "grab_teleop_every_n": GRAB_TELEOP_EVERY_N,
             "depth_colormap": DEPTH_COLORMAP,
             "depth_minmax": DEPTH_MINMAX,
             "depth_normalize_percentile": DEPTH_NORMALIZE_PERCENTILE,
             "depth_percentile_range": DEPTH_PERCENTILE_RANGE,
-            "odom_state": odom_state,
-            "generate_pointcloud": GENERATE_POINTCLOUD,
-            "pcd_every_n": PCD_EVERY_N,
-            "depth_scale": DEPTH_SCALE,
-            "depth_trunc": DEPTH_TRUNC,
             "client": client,
         },
         daemon=True,
     )
+
+    mapping_thread = threading.Thread(
+        target=mapping_loop,
+        args=(cam_state, odom_state, stop_evt, client),
+        kwargs={
+            "mapping_hz": MAPPING_HZ,
+            "depth_scale": DEPTH_SCALE,
+            "depth_trunc": DEPTH_TRUNC,
+        },
+        daemon=True,
+    ) if ENABLE_MAPPING else None
 
     teleop_thread = threading.Thread(
         target=teleop_loop,
@@ -114,6 +128,8 @@ def main() -> None:
         cam_thread.start()
         teleop_thread.start()
         odom_thread.start()
+        if mapping_thread is not None:
+            mapping_thread.start()
 
         # Run Open3D in main thread (blocking until window closes or ESC pressed)
         open3d_vis_loop(
@@ -131,6 +147,8 @@ def main() -> None:
         cam_thread.join(timeout=2.0)
         teleop_thread.join(timeout=2.0)
         odom_thread.join(timeout=2.0)
+        if mapping_thread is not None:
+            mapping_thread.join(timeout=2.0)
         try:
             client.goto_base_defined_speed(0.0, 0.0, 0.0)
             reachy.mobile_base.turn_off()

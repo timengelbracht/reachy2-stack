@@ -6,48 +6,110 @@ from typing import Optional
 
 import numpy as np
 import cv2
-import open3d as o3d
 
+from reachy2_stack.core.client import ReachyClient
+
+class CameraState:
+    """Thread-safe container for camera state and latest frames."""
+    def __init__(self):
+        self.lock = threading.Lock()
+        # Depth camera (RGBD)
+        self.rgb_frame: Optional[np.ndarray] = None
+        self.depth_frame: Optional[np.ndarray] = None
+        self.timestamp: float = 0.0
+        # Teleop cameras (stereo RGB)
+        self.teleop_left_frame: Optional[np.ndarray] = None
+        self.teleop_right_frame: Optional[np.ndarray] = None
+        self.teleop_timestamp: float = 0.0
+
+    def update_frames(self, rgb_frame: np.ndarray, depth_frame: np.ndarray):
+        """Update the latest RGB and depth frames from depth camera.
+
+        Args:
+            rgb_frame: Latest RGB frame as a numpy array
+            depth_frame: Latest depth frame as a numpy array
+        """
+        with self.lock:
+            self.rgb_frame = rgb_frame
+            self.depth_frame = depth_frame
+            self.timestamp = time.time()
+
+    def update_teleop_frames(self, left_frame: np.ndarray, right_frame: np.ndarray):
+        """Update the latest left and right teleop camera frames.
+
+        Args:
+            left_frame: Latest left teleop RGB frame
+            right_frame: Latest right teleop RGB frame
+        """
+        with self.lock:
+            self.teleop_left_frame = left_frame
+            self.teleop_right_frame = right_frame
+            self.teleop_timestamp = time.time()
+
+    def get_frames(self) -> Optional[tuple[np.ndarray, np.ndarray, float]]:
+        """Get the latest RGB and depth frames from depth camera.
+
+        Returns:
+            Tuple of (rgb_frame, depth_frame, timestamp) or None if frames are not available
+        """
+        with self.lock:
+            if self.rgb_frame is not None and self.depth_frame is not None:
+                return self.rgb_frame.copy(), self.depth_frame.copy(), self.timestamp
+            else:
+                print("[CAM STATE] No frames available")
+                return None
+
+    def get_teleop_frames(self) -> Optional[tuple[np.ndarray, np.ndarray, float]]:
+        """Get the latest left and right teleop camera frames.
+
+        Returns:
+            Tuple of (left_frame, right_frame, timestamp) or None if frames are not available
+        """
+        with self.lock:
+            if self.teleop_left_frame is not None and self.teleop_right_frame is not None:
+                return self.teleop_left_frame.copy(), self.teleop_right_frame.copy(), self.teleop_timestamp
+            else:
+                return None
 
 def camera_loop(
-    reachy,
-    stop_evt: threading.Event,
-    show_rgb: bool = True,
-    show_depth: bool = True,
-    render_fps: float = 20.0,
-    grab_every_n: int = 1,
-    depth_colormap=cv2.COLORMAP_JET,
-    depth_minmax=None,
-    depth_normalize_percentile: bool = True,
-    depth_percentile_range=(1, 99),
-    odom_state=None,
-    generate_pointcloud: bool = False,
-    pcd_every_n: int = 30,
-    depth_scale: float = 1.0,
-    depth_trunc: float = 3.0,
-    client=None,
-) -> None:
-    """Display camera feeds using OpenCV (thread-safe).
+        reachy: 'ReachyClient',
+        camera_state: CameraState,
+        stop_evt: threading.Event,
+        show_rgb: bool = True,
+        show_depth: bool = True,
+        show_teleop: bool = False,
+        render_fps: float = 20.0,
+        grab_every_n: int = 1,
+        grab_teleop_every_n: int = 1,
+        depth_colormap=cv2.COLORMAP_JET,
+        depth_minmax=None,
+        depth_normalize_percentile: bool = True,
+        depth_percentile_range=(1, 99),
+        client: Optional['ReachyClient'] = None,
+    ) -> None:
+
+    """Camera State Update Loop with OpenCV Display.
+
+    This loop only handles frame acquisition and optional visualization.
+    Point cloud generation is handled separately in mapping.py.
 
     Args:
         reachy: Reachy SDK instance
+        camera_state: CameraState instance for sharing frames
         stop_evt: Threading event to signal loop termination
-        show_rgb: Show RGB camera feed
+        show_rgb: Show RGB camera feed from depth camera
         show_depth: Show depth camera feed
+        show_teleop: Show teleop stereo cameras (left + right)
         render_fps: Frame rate for display
-        grab_every_n: Grab frames every N iterations (reduces load)
+        grab_every_n: Grab depth camera frames every N iterations (reduces load)
+        grab_teleop_every_n: Grab teleop frames every N iterations (0 = disabled, default 1)
         depth_colormap: OpenCV colormap for depth visualization
         depth_minmax: Fixed depth range (lo, hi) or None for auto-scale
         depth_normalize_percentile: Use percentile normalization for better visibility
         depth_percentile_range: Percentile range for normalization
-        odom_state: Optional OdometryState instance for point cloud updates
-        generate_pointcloud: Generate point clouds from RGBD frames
-        pcd_every_n: Generate point cloud every N frames
-        depth_scale: Scale factor for depth (1.0 if depth is in meters)
-        depth_trunc: Maximum depth value to include in point cloud (in meters)
-        client: Optional ReachyClient instance for getting camera intrinsics
+        client: ReachyClient instance for teleop camera access
     """
-    if not (show_rgb or show_depth):
+    if not (show_rgb or show_depth or show_teleop):
         return
 
     dt = 1.0 / max(1e-6, render_fps)
@@ -59,36 +121,37 @@ def camera_loop(
     if show_depth:
         cv2.namedWindow("Reachy Depth Camera", cv2.WINDOW_NORMAL)
         cv2.resizeWindow("Reachy Depth Camera", 640, 480)
+    if show_teleop:
+        cv2.namedWindow("Reachy Teleop Cameras (L+R)", cv2.WINDOW_NORMAL)
+        cv2.resizeWindow("Reachy Teleop Cameras (L+R)", 1280, 480)
 
     grab_count = 0
-    pcd_count = 0
+    teleop_grab_count = 0
 
-    # Get camera intrinsics for point cloud generation
-    intrinsics = None
-    if generate_pointcloud and odom_state is not None:
-        if client is None:
-            print(f"[CAM] Warning: client is required for point cloud generation")
-            generate_pointcloud = False
-        else:
-            try:
-                intrinsics = client.get_depth_intrinsics()
-                print(f"[CAM] Point cloud generation enabled (every {pcd_every_n} frames)")
-            except Exception as e:
-                print(f"[CAM] Could not get camera intrinsics: {e}")
-                generate_pointcloud = False
+    # Check if teleop cameras are enabled
+    enable_teleop = show_teleop and grab_teleop_every_n > 0 and client is not None
+    if show_teleop and (grab_teleop_every_n <= 0 or client is None):
+        print("[CAM] Warning: Teleop cameras disabled (grab_teleop_every_n must be > 0 and client required)")
+        enable_teleop = False
 
     print("[CAM] Camera display started")
+    if enable_teleop:
+        print(f"[CAM] Teleop cameras enabled (grabbing every {grab_teleop_every_n} frames)")
 
     while not stop_evt.is_set():
         t0 = time.time()
         grab_count += 1
+        teleop_grab_count += 1
 
-        # Grab frames only every N-th iteration
+        # Grab depth camera frames every N-th iteration
         if grab_count % grab_every_n == 0:
             try:
+                rgb, _ = reachy.cameras.depth.get_frame()
+                depth, _ = reachy.cameras.depth.get_depth_frame()
+                camera_state.update_frames(np.asarray(rgb), np.asarray(depth))
+
                 if show_rgb:
-                    frame, _ = reachy.cameras.depth.get_frame()
-                    frame = np.asarray(frame)
+                    frame = np.asarray(rgb)
                     if frame.ndim == 3 and frame.shape[2] == 3:
                         # OpenCV expects BGR, so no conversion needed if it's already BGR
                         cv2.imshow("Reachy RGB Camera", frame)
@@ -96,8 +159,8 @@ def camera_loop(
                         cv2.imshow("Reachy RGB Camera", frame)
 
                 if show_depth:
-                    d, _ = reachy.cameras.depth.get_depth_frame()
-                    d = np.asarray(d)
+            
+                    d = np.asarray(depth)
 
                     if d.ndim == 3 and d.shape[2] == 3:
                         # Already colorized
@@ -141,38 +204,29 @@ def camera_loop(
                             dd_color = cv2.applyColorMap(dd_norm, depth_colormap)
                             cv2.imshow("Reachy Depth Camera", dd_color)
 
-                # Generate point cloud from RGBD
-                if generate_pointcloud and odom_state is not None and intrinsics is not None:
-                    if pcd_count % pcd_every_n == 0:
-                        try:
-                            # Get RGB and depth frames
-                            rgb_frame, _ = reachy.cameras.depth.get_frame()
-                            depth_frame, _ = reachy.cameras.depth.get_depth_frame()
+            except Exception as e:
+                print(f"[CAM] Depth camera grab error: {e}")
 
-                            rgb = np.asarray(rgb_frame)
-                            depth = np.asarray(depth_frame).squeeze()
+        # Grab teleop camera frames every N-th iteration
+        if enable_teleop and teleop_grab_count % grab_teleop_every_n == 0:
+            try:
+                left_frame = client.get_teleop_rgb_left()
+                right_frame = client.get_teleop_rgb_right()
 
-                            # Create point cloud in camera frame
-                            from .utils import rgbd_to_pointcloud
-                            pcd_camera = rgbd_to_pointcloud(
-                                rgb,
-                                depth,
-                                intrinsics,
-                                depth_scale=depth_scale,
-                                depth_trunc=depth_trunc,
-                            )
-                            # Update odometry state with new point cloud
-                            odom_state.update_pointcloud(pcd_camera)
-                        except Exception as e:
-                            print(f"[CAM] point cloud generation error: {e}")
-                            import traceback
-                            traceback.print_exc()
+                left_img = np.asarray(left_frame)
+                right_img = np.asarray(right_frame)
 
-                    # Increment counter after processing
-                    pcd_count += 1
+                # Update camera state
+                camera_state.update_teleop_frames(left_img, right_img)
+
+                # Display combined left+right image
+                if show_teleop:
+                    # Concatenate left and right horizontally
+                    combined = np.hstack([left_img, right_img])
+                    cv2.imshow("Reachy Teleop Cameras (L+R)", combined)
 
             except Exception as e:
-                print(f"[CAM] grab error: {e}")
+                print(f"[CAM] Teleop camera grab error: {e}")
 
         # OpenCV needs waitKey to process window events (even if we don't use the key)
         cv2.waitKey(1)
@@ -187,4 +241,6 @@ def camera_loop(
         cv2.destroyWindow("Reachy RGB Camera")
     if show_depth:
         cv2.destroyWindow("Reachy Depth Camera")
+    if show_teleop:
+        cv2.destroyWindow("Reachy Teleop Cameras (L+R)")
     print("[CAM] Camera display stopped")
