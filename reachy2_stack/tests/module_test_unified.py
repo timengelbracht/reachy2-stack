@@ -293,7 +293,7 @@ def main() -> None:
         kwargs={
             "fps": args.vis_fps,
             "show_trajectory": True,
-            "show_pointcloud": False,
+            "show_pointcloud": True,
             "show_camera_frames": True,
             "show_images": True,  # Show RGB, depth, teleop images
             "depth_scale": DEPTH_SCALE,
@@ -322,7 +322,28 @@ def main() -> None:
                 # Get RobotState and forward to vis + mapping + localization
                 try:
                     state = state_queue.get_nowait()
-                    # Send RobotState to vis process (for images, trajectory)
+
+                    # Apply fusion correction if localization is enabled and initialized
+                    # This corrects T_world_base using the latest offset from localization
+                    if args.localization and fusion is not None and fusion.is_initialized:
+                        # print("[MAIN] Applied localization offset correction to RobotState")
+                        # print(f"  Before: T_world_base =\n{state.T_world_base}")
+                        
+                        T_world_base_corrected = fusion.get_T_world_base(
+                            state.get_T_world_base()
+                        )
+                        # print(f"  After: T_world_base =\n{T_world_base_corrected}")
+                        # Update RobotState with corrected pose
+                        state.T_world_base = T_world_base_corrected
+                        # also update T_world_cam for completeness
+                        if state.depth_extrinsics is not None:
+                            state.T_world_cam = (
+                                T_world_base_corrected @ state.depth_extrinsics
+                            )
+                            
+                        
+
+                    # Send corrected RobotState to vis process (for images, trajectory)
                     try:
                         vis_queue.put_nowait(state)
                     except:

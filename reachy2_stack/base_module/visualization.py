@@ -256,7 +256,7 @@ def vis_process(
                         trajectory.pop(0)
 
                     # IMMEDIATELY update robot base frame (no rate limiting!)
-                    T_odom_base = data.get_T_odom_base()
+                    T_odom_base = data.get_T_world_base()
                     T_delta = T_odom_base @ np.linalg.inv(prev_robot_T)
                     robot_frame.transform(T_delta)
                     prev_robot_T = T_odom_base.copy()
@@ -416,7 +416,7 @@ def vis_process(
                 state = map_state.robot_state
 
                 # Update robot base frame
-                T_odom_base = state.get_T_odom_base()
+                T_odom_base = state.get_T_world_base()
                 T_delta = T_odom_base @ np.linalg.inv(prev_robot_T)
                 robot_frame.transform(T_delta)
                 prev_robot_T = T_odom_base.copy()

@@ -113,7 +113,12 @@ def robot_state_loop(
                 # Compute camera pose in odom frame: T_odom_cam = T_odom_base @ T_base_cam
                 T_odom_base = state.get_T_odom_base()
                 T_odom_cam = T_odom_base @ T_base_depth
+
+                state.T_world_base = T_odom_base # initially, world = odom
+                state.T_world_cam = T_odom_cam   # initially, world = odom
+                
                 camera_buffer.push(state.timestamp, T_odom_cam, T_odom_base)
+                
             except Exception as e:
                 print(f"[ROBOT_STATE] Camera buffer push error: {e}")
 

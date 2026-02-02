@@ -61,7 +61,7 @@ class RobotState:
 
         return xytheta_to_T(self.odom_x, self.odom_y, self.odom_theta)
 
-    def get_pose(self) -> np.ndarray:
+    def get_T_world_base(self) -> np.ndarray:
         """Get best available pose (world frame if available, else odom)."""
         if self.T_world_base is not None:
             return self.T_world_base
@@ -75,7 +75,7 @@ class RobotState:
         """
         if self.depth_extrinsics is None:
             return None
-        return self.get_T_odom_base() @ self.depth_extrinsics
+        return self.get_T_world_base() @ self.depth_extrinsics
 
     def get_T_odom_teleop_left(self) -> Optional[np.ndarray]:
         """Get teleop left camera pose in odom frame.
@@ -85,7 +85,7 @@ class RobotState:
         """
         if self.teleop_left_extrinsics is None:
             return None
-        return self.get_T_odom_base() @ self.teleop_left_extrinsics
+        return self.get_T_world_base() @ self.teleop_left_extrinsics
 
     def get_T_odom_teleop_right(self) -> Optional[np.ndarray]:
         """Get teleop right camera pose in odom frame.
@@ -95,7 +95,7 @@ class RobotState:
         """
         if self.teleop_right_extrinsics is None:
             return None
-        return self.get_T_odom_base() @ self.teleop_right_extrinsics
+        return self.get_T_world_base() @ self.teleop_right_extrinsics
 
     def has_depth(self) -> bool:
         """Check if depth camera data is available."""
