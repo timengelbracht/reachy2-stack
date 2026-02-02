@@ -1,22 +1,18 @@
 #!/usr/bin/env python3
-"""Unified test script with hybrid threading + multiprocessing architecture.
+"""Unified test script for robot_state_loop and vis_process.
 
-This script demonstrates the new architecture:
+This script tests:
 - robot_state_thread: Unified camera + odometry -> RobotState queue
-- teleop_thread: Keyboard control (unchanged)
-- mapping_thread: Processes RobotState (local or server mode)
-- navigation_thread: Path following (optional)
-- vis_process: Separate process for visualization (no GIL contention)
+- teleop_thread: Keyboard control
+- vis_process: Visualization with Open3D (3D) and OpenCV (images)
+
+The vis_process receives RobotState objects directly and:
+- Shows all camera image frames (RGB, depth, teleop)
+- Visualizes RGBD point cloud in world frame using intrinsics and camera pose
 
 Usage:
-    # Local mapping mode (CPU-bound, holds GIL)
     python reachy2_stack/tests/module_test_unified.py
-
-    # Server mapping mode (I/O-bound, parallel-friendly)
-    # First start the wavemap server:
-    #   python ext_server/wavemap_server.py --port 5555
-    # Then run:
-    python reachy2_stack/tests/module_test_unified.py --mode server
+    python reachy2_stack/tests/module_test_unified.py --teleop  # Enable teleop cameras
 """
 
 import argparse
@@ -29,7 +25,6 @@ from reachy2_stack.utils.utils_dataclass import ReachyConfig
 from reachy2_stack.core.client import ReachyClient
 from reachy2_stack.base_module import teleop_loop
 from reachy2_stack.base_module.robot_state_loop import robot_state_loop
-from reachy2_stack.base_module.mapping import mapping_loop_unified
 from reachy2_stack.base_module.visualization import vis_process
 
 # ---------------- CONFIG ----------------
@@ -44,16 +39,10 @@ VX = 0.6
 VY = 0.6
 WZ = 110.0
 
-# Mapping
-MAPPING_MODE = "local"  # "local" or "server"
-MAPPING_HZ = 2.0
-MAPPING_SERVER_HOST = "localhost"
-MAPPING_SERVER_PORT = 5555
+# Visualization
+VIS_FPS = 10
 DEPTH_SCALE = 0.001  # mm to meters
 DEPTH_TRUNC = 3.5  # meters
-
-# Visualization
-VIS_FPS = 30
 # --------------------------------------
 
 
@@ -61,36 +50,36 @@ def main() -> None:
     """Main entry point."""
     parser = argparse.ArgumentParser(description="Unified module test")
     parser.add_argument(
-        "--mode",
-        choices=["local", "server"],
-        default=MAPPING_MODE,
-        help="Mapping mode: local (CPU) or server (ZMQ)",
-    )
-    parser.add_argument(
         "--host",
         default=HOST,
         help="Robot host IP",
     )
     parser.add_argument(
-        "--server-host",
-        default=MAPPING_SERVER_HOST,
-        help="Wavemap server host (for server mode)",
+        "--teleop",
+        action="store_true",
+        help="Enable teleop cameras",
     )
     parser.add_argument(
-        "--server-port",
+        "--state-hz",
         type=int,
-        default=MAPPING_SERVER_PORT,
-        help="Wavemap server port (for server mode)",
+        default=STATE_HZ,
+        help="Robot state acquisition rate (Hz)",
+    )
+    parser.add_argument(
+        "--vis-fps",
+        type=int,
+        default=VIS_FPS,
+        help="Visualization frame rate (FPS)",
     )
     args = parser.parse_args()
 
     print("\n" + "=" * 60)
-    print("UNIFIED MODULE TEST")
+    print("UNIFIED MODULE TEST (robot_state_loop + vis_process)")
     print("=" * 60)
     print(f"Robot host: {args.host}")
-    print(f"Mapping mode: {args.mode}")
-    if args.mode == "server":
-        print(f"Wavemap server: {args.server_host}:{args.server_port}")
+    print(f"State acquisition: {args.state_hz} Hz")
+    print(f"Teleop cameras: {args.teleop}")
+    print(f"Visualization FPS: {args.vis_fps}")
     print("=" * 60 + "\n")
 
     # Setup
@@ -110,8 +99,7 @@ def main() -> None:
 
     # === Queues ===
     state_queue = Queue(maxsize=5)  # RobotState from robot_state_thread
-    mapping_result_queue = Queue(maxsize=5)  # Results from mapping_thread
-    vis_queue = MPQueue(maxsize=20)  # For vis process
+    vis_queue = MPQueue(maxsize=20)  # For vis process (RobotState objects)
 
     # === THREADS (main process, I/O-bound) ===
     threads = [
@@ -119,9 +107,9 @@ def main() -> None:
             target=robot_state_loop,
             args=(client, state_queue, stop_event),
             kwargs={
-                "hz": STATE_HZ,
+                "hz": args.state_hz,
                 "grab_depth": True,
-                "grab_teleop": False,
+                "grab_teleop": args.teleop,
             },
             daemon=True,
             name="robot_state",
@@ -138,20 +126,6 @@ def main() -> None:
             daemon=True,
             name="teleop",
         ),
-        threading.Thread(
-            target=mapping_loop_unified,
-            args=(state_queue, mapping_result_queue, stop_event),
-            kwargs={
-                "mode": args.mode,
-                "server_host": args.server_host,
-                "server_port": args.server_port,
-                "hz": MAPPING_HZ,
-                "depth_scale": DEPTH_SCALE,
-                "depth_trunc": DEPTH_TRUNC,
-            },
-            daemon=True,
-            name="mapping",
-        ),
     ]
 
     # === PROCESS (separate GIL for visualization) ===
@@ -159,9 +133,13 @@ def main() -> None:
         target=vis_process,
         args=(vis_queue, stop_event),
         kwargs={
-            "fps": VIS_FPS,
+            "fps": args.vis_fps,
             "show_trajectory": True,
             "show_pointcloud": True,
+            "show_camera_frames": True,
+            "show_images": True,  # Show RGB, depth, teleop images
+            "depth_scale": DEPTH_SCALE,
+            "depth_trunc": DEPTH_TRUNC,
         },
         daemon=True,
         name="visualization",
@@ -180,46 +158,21 @@ def main() -> None:
         print("\n[MAIN] All components started")
         print("[MAIN] Press Ctrl+C to stop\n")
 
-        # Main loop: forward data from mapping results to vis process
-        last_state = None
+        # Main loop: forward RobotState directly to vis process
         while not stop_event.is_set():
             try:
-                # Get mapping results and forward to vis
+                # Get RobotState and forward directly to vis
                 try:
-                    result = mapping_result_queue.get_nowait()
-
-                    # Build vis data packet
-                    vis_data = {}
-
-                    # Add odometry from state
-                    if "state" in result and result["state"] is not None:
-                        state = result["state"]
-                        vis_data["odom_x"] = state.odom_x
-                        vis_data["odom_y"] = state.odom_y
-                        vis_data["odom_theta"] = state.odom_theta
-
-                    # Add point cloud data
-                    if "occupied_points" in result:
-                        vis_data["occupied_points"] = result["occupied_points"]
-                    if "occupied_colors" in result:
-                        vis_data["occupied_colors"] = result["occupied_colors"]
-                    if "free_points" in result:
-                        vis_data["free_points"] = result["free_points"]
-                    if "points" in result:
-                        vis_data["points"] = result["points"]
-                    if "colors" in result:
-                        vis_data["colors"] = result["colors"]
-
-                    # Send to vis process
+                    state = state_queue.get_nowait()
+                    # Send RobotState directly to vis process
                     try:
-                        vis_queue.put_nowait(vis_data)
+                        vis_queue.put_nowait(state)
                     except:
                         pass  # Queue full, drop
-
                 except:
-                    pass  # No results ready
+                    pass  # No state ready
 
-                time.sleep(0.02)  # 50 Hz main loop
+                time.sleep(0.01)  # 100 Hz main loop
 
             except KeyboardInterrupt:
                 break

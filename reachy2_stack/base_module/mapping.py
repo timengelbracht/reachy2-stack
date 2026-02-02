@@ -12,7 +12,6 @@ import msgpack
 import msgpack_numpy as m
 
 from .camera import CameraState
-from .odometry import OdometryState
 from .utils import rgbd_to_pointcloud
 
 # Enable msgpack-numpy for efficient numpy array serialization

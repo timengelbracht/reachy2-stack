@@ -1,218 +1,10 @@
 """Open3D 3D visualization for odometry and trajectory."""
 
 import time
-import threading
 from multiprocessing import Queue as MPQueue
 from multiprocessing.synchronize import Event as MPEvent
 
-import numpy as np
-import open3d as o3d
-
-from .odometry import OdometryState
-from .utils import create_coordinate_frame, pose_to_transform
-
-
-def open3d_vis_loop(
-    odom_state: OdometryState,
-    stop_evt: threading.Event,
-    vis_update_hz: float = 10.0,
-    show_trajectory: bool = True,
-    show_camera: bool = True,
-    show_pointcloud: bool = False,
-    coord_frame_size: float = 0.3,
-    grid_size: float = 50.0,
-    grid_div: int = 50,
-) -> None:
-    """Run Open3D visualization in main thread (non-blocking mode).
-
-    Args:
-        odom_state: Shared OdometryState object
-        stop_evt: Threading event to signal loop termination
-        vis_update_hz: Update rate for visualization in Hz
-        show_trajectory: Show odometry trajectory trail
-        show_camera: Show camera coordinate frame
-        show_pointcloud: Show point cloud from RGBD
-        coord_frame_size: Size of coordinate frame axes
-        grid_size: Size of ground grid in meters
-        grid_div: Number of grid divisions
-    """
-    # Create visualizer
-    vis = o3d.visualization.Visualizer()
-    vis.create_window(window_name="Reachy Odometry", width=800, height=600)
-
-    # Create geometries
-    origin_frame = create_coordinate_frame(coord_frame_size)
-    base_frame = create_coordinate_frame(coord_frame_size)
-    camera_frame = create_coordinate_frame(coord_frame_size * 0.7)  # Slightly smaller for distinction
-
-    # Create trajectory line
-    trajectory_line = o3d.geometry.LineSet()
-    # paint in hightlight yellow
-    trajectory_line.paint_uniform_color([0.0, 0.5, 0.5])  # Cyan color for trajectory
-
-    # Create point cloud geometry (initially with a single point at origin)
-    # This ensures Open3D can properly update it later
-    pointcloud_geom = None
-    if show_pointcloud:
-        pointcloud_geom = o3d.geometry.PointCloud()
-        # Add a dummy point at origin so geometry is not empty
-        pointcloud_geom.points = o3d.utility.Vector3dVector(np.array([[0, 0, 0]]))
-        pointcloud_geom.colors = o3d.utility.Vector3dVector(np.array([[0.5, 0.5, 0.5]]))
-
-    # Add ground grid
-    lines = []
-    points = []
-    height = -0.5  # Slightly below origin
-    for i in range(grid_div + 1):
-        t = -grid_size / 2 + i * grid_size / grid_div
-        # Lines parallel to X
-        points.append([-grid_size / 2, t, height])
-        points.append([grid_size / 2, t, height])
-        lines.append([len(points) - 2, len(points) - 1])
-        # Lines parallel to Y
-        points.append([t, -grid_size / 2, height])
-        points.append([t, grid_size / 2, height])
-        lines.append([len(points) - 2, len(points) - 1])
-
-    grid_lines = o3d.geometry.LineSet()
-    grid_lines.points = o3d.utility.Vector3dVector(np.array(points))
-    grid_lines.lines = o3d.utility.Vector2iVector(np.array(lines))
-    grid_lines.paint_uniform_color([0.5, 0.5, 0.5])
-
-    # Add invisible bounding points to expand the scene and allow more zoom out
-    # This tricks Open3D into allowing a larger zoom range
-    bounding_points = o3d.geometry.PointCloud()
-    bound_pts = np.array([
-        [-30, -30, -10],
-        [30, 30, 10],
-    ])
-    bounding_points.points = o3d.utility.Vector3dVector(bound_pts)
-    bounding_points.paint_uniform_color([0.1, 0.1, 0.1])  # Nearly invisible
-
-    # Add all geometries
-    vis.add_geometry(origin_frame)
-    vis.add_geometry(base_frame)
-    if show_camera:
-        vis.add_geometry(camera_frame)
-    vis.add_geometry(grid_lines)
-    vis.add_geometry(bounding_points)  # Invisible bounds to allow more zoom
-    if show_trajectory:
-        vis.add_geometry(trajectory_line)
-    if show_pointcloud and pointcloud_geom is not None:
-        vis.add_geometry(pointcloud_geom)
-
-    # Set up view with better initial position
-    ctr = vis.get_view_control()
-
-    # Change field of view for wider viewing angle (default is 60)
-    ctr.change_field_of_view(step=20.0)  # Increase FOV
-
-    # Set a nice initial viewpoint (top-down angled view)
-    ctr.set_zoom(0.1)  # Zoom out much more for wider view
-    ctr.set_front([0.3, 0.3, 0.9])  # Looking down at an angle
-    ctr.set_lookat([0, 0, 0])  # Look at origin
-    ctr.set_up([0, 0, 1])  # Z is up
-
-    # Adjust render options for better viewing
-    render_opt = vis.get_render_option()
-    render_opt.background_color = np.asarray([0.1, 0.1, 0.1])  # Dark gray background
-    render_opt.point_size = 2.0
-    render_opt.line_width = 2.0
-
-    # Try to set viewing frustum - check available attributes
-    try:
-        # Different Open3D versions use different names
-        if hasattr(render_opt, 'depth_far'):
-            render_opt.depth_far = 1000.0
-            print(f"[VIS] Set depth_far to 1000.0")
-        if hasattr(render_opt, 'depth_near'):
-            render_opt.depth_near = 0.01
-            print(f"[VIS] Set depth_near to 0.01")
-
-        # Debug: print available attributes
-        depth_attrs = [attr for attr in dir(render_opt) if 'depth' in attr.lower() or 'clip' in attr.lower() or 'far' in attr.lower() or 'near' in attr.lower()]
-        if depth_attrs:
-            print(f"[VIS] Available depth/clip attributes: {depth_attrs}")
-    except Exception as e:
-        print(f"[VIS] Note: Could not set depth clipping: {e}")
-
-    dt = 1.0 / vis_update_hz
-    prev_T = np.eye(4)  # Track previous base transform
-    prev_T_cam = np.eye(4)  # Track previous camera transform
-
-    print("\n[VIS] Open3D window opened")
-    print("[VIS] Red=X, Green=Y, Blue=Z")
-    print("[VIS] Gray grid = ground plane")
-    print("[VIS] Cyan trail = odometry trajectory")
-    if show_camera:
-        print("[VIS] Small frame = camera")
-    if show_pointcloud:
-        print("[VIS] Point cloud = RGBD camera data in world frame")
-    print("\n[VIS] Mouse controls:")
-    print("  - Left drag: Rotate view")
-    print("  - Right drag / Middle drag: Pan")
-    print("  - Scroll: Zoom in/out")
-    print("  - Ctrl+Left drag: Roll view")
-    print("  - Shift+Left drag: Pan (alternative)\n")
-
-    while not stop_evt.is_set():
-        t0 = time.time()
-
-        # Get current pose
-        x, y, theta = odom_state.get_pose()
-        T_base = pose_to_transform(x, y, theta)
-
-        # Update base frame: apply inverse of previous, then new transform
-        T_delta_base = T_base @ np.linalg.inv(prev_T)
-        base_frame.transform(T_delta_base)
-        prev_T = T_base.copy()
-
-        # Update camera frame
-        if show_camera:
-            T_world_cam = odom_state.get_camera_pose()
-            T_delta_cam = T_world_cam @ np.linalg.inv(prev_T_cam)
-            camera_frame.transform(T_delta_cam)
-            prev_T_cam = T_world_cam.copy()
-
-        # Update trajectory
-        if show_trajectory:
-            traj = odom_state.get_trajectory()
-            if len(traj) > 1:
-                trajectory_line.points = o3d.utility.Vector3dVector(traj)
-                lines_traj = [[i, i + 1] for i in range(len(traj) - 1)]
-                trajectory_line.lines = o3d.utility.Vector2iVector(np.array(lines_traj))
-                # Reapply color after updating geometry (Open3D may reset it)
-                colors = [[0.0, 0.5, 0.5] for _ in range(len(lines_traj))]  # Cyan for each line segment
-                trajectory_line.colors = o3d.utility.Vector3dVector(colors)
-
-        # Update point cloud
-        if show_pointcloud and pointcloud_geom is not None:
-            pcd_world = odom_state.get_pointcloud()
-            if pcd_world is not None and len(pcd_world.points) > 0:
-                pointcloud_geom.points = pcd_world.points
-                pointcloud_geom.colors = pcd_world.colors
-
-        # Update visualization
-        vis.update_geometry(base_frame)
-        if show_camera:
-            vis.update_geometry(camera_frame)
-        if show_trajectory:
-            vis.update_geometry(trajectory_line)
-        if show_pointcloud and pointcloud_geom is not None:
-            vis.update_geometry(pointcloud_geom)
-
-        if not vis.poll_events():
-            stop_evt.set()
-            break
-        vis.update_renderer()
-
-        # Pace updates
-        sleep_t = dt - (time.time() - t0)
-        if sleep_t > 0:
-            time.sleep(sleep_t)
-
-    vis.destroy_window()
-    print("\n[VIS] Open3D window closed")
+from .utils import rgbd_to_pointcloud
 
 
 def vis_process(
@@ -221,34 +13,53 @@ def vis_process(
     fps: int = 30,
     show_trajectory: bool = True,
     show_pointcloud: bool = True,
+    show_camera_frames: bool = True,
+    show_images: bool = True,
     coord_frame_size: float = 0.5,
     grid_size: float = 50.0,
     grid_div: int = 50,
+    depth_scale: float = 0.001,
+    depth_trunc: float = 3.5,
 ) -> None:
     """Visualization in a separate process.
 
-    Reads from vis_queue and renders with Open3D.
+    Reads from vis_queue and renders with Open3D (3D) and Matplotlib (images).
     This function is designed to run in a separate process
     (via multiprocessing.Process) so it has its own GIL and
     doesn't block I/O threads.
 
+    Supports both:
+    - RobotState objects (new unified format with camera calibration)
+    - Dict format (backward compatible with existing code)
+
     Args:
-        vis_queue: multiprocessing.Queue containing dicts with:
-            - 'odom_x', 'odom_y', 'odom_theta': odometry updates
-            - 'occupied_points', 'occupied_colors': occupied voxels
-            - 'free_points': free voxels
-            - 'points', 'colors': generic point cloud
+        vis_queue: multiprocessing.Queue containing either:
+            - RobotState objects (with full camera calibration)
+            - dicts with:
+                - 'odom_x', 'odom_y', 'odom_theta': odometry updates
+                - 'occupied_points', 'occupied_colors': occupied voxels
+                - 'free_points': free voxels
+                - 'points', 'colors': generic point cloud
         stop_event: multiprocessing.Event to signal shutdown
         fps: Target rendering frame rate
         show_trajectory: Show odometry trajectory trail
-        show_pointcloud: Show point clouds from mapping
+        show_pointcloud: Show point clouds from RGBD (in world frame)
+        show_camera_frames: Show coordinate frames for all cameras
+        show_images: Show camera images (RGB, depth, teleop) with Matplotlib
         coord_frame_size: Size of coordinate frame axes
         grid_size: Size of ground grid in meters
         grid_div: Number of grid divisions
+        depth_scale: Scale factor for depth (0.001 if depth in mm)
+        depth_trunc: Maximum depth to include in meters
     """
     # Import inside process to avoid serialization issues
     import open3d as o3d
     import numpy as np
+    import cv2
+    import matplotlib
+    matplotlib.use('TkAgg')  # Use TkAgg backend for interactive display
+    import matplotlib.pyplot as plt
+    from .robot_state import RobotState
 
     print("[VIS PROCESS] Starting visualization process")
 
@@ -258,6 +69,12 @@ def vis_process(
     # Create geometries
     origin_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=coord_frame_size)
     robot_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=coord_frame_size)
+
+    # Camera frames (smaller to distinguish from robot frame)
+    depth_cam_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=coord_frame_size * 0.6)
+    teleop_left_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=coord_frame_size * 0.4)
+    teleop_right_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=coord_frame_size * 0.4)
+
     traj_pcd = o3d.geometry.PointCloud()
     occ_pcd = o3d.geometry.PointCloud()
     free_pcd = o3d.geometry.PointCloud()
@@ -284,6 +101,10 @@ def vis_process(
     vis.add_geometry(origin_frame)
     vis.add_geometry(robot_frame)
     vis.add_geometry(grid_lines)
+    if show_camera_frames:
+        vis.add_geometry(depth_cam_frame)
+        vis.add_geometry(teleop_left_frame)
+        vis.add_geometry(teleop_right_frame)
     if show_trajectory:
         vis.add_geometry(traj_pcd)
     if show_pointcloud:
@@ -305,80 +126,258 @@ def vis_process(
 
     trajectory = []
     interval = 1.0 / fps
+
+    # Track previous transforms for incremental updates
     prev_robot_T = np.eye(4)
+    prev_depth_T = np.eye(4)
+    prev_teleop_left_T = np.eye(4)
+    prev_teleop_right_T = np.eye(4)
+
+    # Set up matplotlib figure for camera images (2x2 grid)
+    fig = None
+    axs = None
+    im_rgb = None
+    im_depth = None
+    im_teleop_left = None
+    im_teleop_right = None
+
+    if show_images:
+        plt.ion()  # Enable interactive mode
+        fig, axs = plt.subplots(2, 2, figsize=(12, 8))
+        fig.canvas.manager.set_window_title("Camera Views")
+
+        # Initialize with placeholder images
+        placeholder = np.zeros((480, 640, 3), dtype=np.uint8)
+        placeholder_depth = np.zeros((480, 640), dtype=np.uint8)
+
+        axs[0, 0].set_title("RGB (Depth Camera)")
+        im_rgb = axs[0, 0].imshow(placeholder)
+        axs[0, 0].axis('off')
+
+        axs[0, 1].set_title("Depth")
+        im_depth = axs[0, 1].imshow(placeholder_depth, cmap='jet', vmin=0, vmax=255)
+        axs[0, 1].axis('off')
+
+        axs[1, 0].set_title("Teleop Left")
+        im_teleop_left = axs[1, 0].imshow(placeholder)
+        axs[1, 0].axis('off')
+
+        axs[1, 1].set_title("Teleop Right")
+        im_teleop_right = axs[1, 1].imshow(placeholder)
+        axs[1, 1].axis('off')
+
+        plt.tight_layout()
+        plt.show(block=False)
+        plt.pause(0.01)
 
     print("[VIS PROCESS] Visualization ready")
+    print("[VIS PROCESS] Robot frame = large, Depth cam = medium, Teleop cams = small")
+    if show_images:
+        print("[VIS PROCESS] Matplotlib image window enabled (close window to quit)")
 
     while not stop_event.is_set():
         t0 = time.time()
 
         # Drain queue (get all pending updates)
-        updates_processed = 0
+        latest_state = None
         while True:
             try:
                 data = vis_queue.get_nowait()
-                updates_processed += 1
 
-                # Update trajectory from odometry
-                if "odom_x" in data and data["odom_x"] is not None:
-                    trajectory.append([data["odom_x"], data["odom_y"], 0.0])
+                # Check if it's a RobotState object
+                if isinstance(data, RobotState):
+                    latest_state = data
+                    # Also update trajectory from RobotState
+                    trajectory.append([data.odom_x, data.odom_y, 0.0])
                     if len(trajectory) > 500:
                         trajectory.pop(0)
+                else:
+                    # Dict format (backward compatibility)
+                    if "odom_x" in data and data["odom_x"] is not None:
+                        trajectory.append([data["odom_x"], data["odom_y"], 0.0])
+                        if len(trajectory) > 500:
+                            trajectory.pop(0)
 
-                    if show_trajectory and len(trajectory) > 0:
-                        traj_pcd.points = o3d.utility.Vector3dVector(trajectory)
-                        traj_pcd.paint_uniform_color([0.0, 0.5, 0.5])  # Cyan
+                        # Update robot frame position
+                        theta_rad = np.deg2rad(data.get("odom_theta", 0))
+                        new_T = np.eye(4)
+                        new_T[0, 0] = np.cos(theta_rad)
+                        new_T[0, 1] = -np.sin(theta_rad)
+                        new_T[1, 0] = np.sin(theta_rad)
+                        new_T[1, 1] = np.cos(theta_rad)
+                        new_T[0, 3] = data["odom_x"]
+                        new_T[1, 3] = data["odom_y"]
 
-                    # Update robot frame position
-                    theta_rad = np.deg2rad(data.get("odom_theta", 0))
-                    new_T = np.eye(4)
-                    new_T[0, 0] = np.cos(theta_rad)
-                    new_T[0, 1] = -np.sin(theta_rad)
-                    new_T[1, 0] = np.sin(theta_rad)
-                    new_T[1, 1] = np.cos(theta_rad)
-                    new_T[0, 3] = data["odom_x"]
-                    new_T[1, 3] = data["odom_y"]
+                        T_delta = new_T @ np.linalg.inv(prev_robot_T)
+                        robot_frame.transform(T_delta)
+                        prev_robot_T = new_T.copy()
 
-                    T_delta = new_T @ np.linalg.inv(prev_robot_T)
-                    robot_frame.transform(T_delta)
-                    prev_robot_T = new_T.copy()
+                    # Update occupied point cloud (from external mapping)
+                    if "occupied_points" in data and data["occupied_points"] is not None:
+                        pts = data["occupied_points"]
+                        if len(pts) > 0:
+                            occ_pcd.points = o3d.utility.Vector3dVector(pts)
+                            if "occupied_colors" in data and data["occupied_colors"] is not None:
+                                colors = data["occupied_colors"]
+                                if colors.dtype == np.uint8:
+                                    colors = colors.astype(np.float64) / 255.0
+                                occ_pcd.colors = o3d.utility.Vector3dVector(colors)
+                            else:
+                                occ_pcd.paint_uniform_color([0.0, 1.0, 0.0])
 
-                # Update occupied point cloud
-                if "occupied_points" in data and data["occupied_points"] is not None:
-                    pts = data["occupied_points"]
-                    if len(pts) > 0:
-                        occ_pcd.points = o3d.utility.Vector3dVector(pts)
-                        if "occupied_colors" in data and data["occupied_colors"] is not None:
-                            colors = data["occupied_colors"]
-                            if colors.dtype == np.uint8:
-                                colors = colors.astype(np.float64) / 255.0
-                            occ_pcd.colors = o3d.utility.Vector3dVector(colors)
-                        else:
-                            occ_pcd.paint_uniform_color([0.0, 1.0, 0.0])  # Green
+                    # Update free point cloud
+                    if "free_points" in data and data["free_points"] is not None:
+                        pts = data["free_points"]
+                        if len(pts) > 0:
+                            free_pcd.points = o3d.utility.Vector3dVector(pts)
+                            free_pcd.paint_uniform_color([0.5, 0.5, 0.5])
 
-                # Update free point cloud
-                if "free_points" in data and data["free_points"] is not None:
-                    pts = data["free_points"]
-                    if len(pts) > 0:
-                        free_pcd.points = o3d.utility.Vector3dVector(pts)
-                        free_pcd.paint_uniform_color([0.5, 0.5, 0.5])  # Gray
-
-                # Generic point cloud (from local mapping mode)
-                if "points" in data and data["points"] is not None:
-                    pts = data["points"]
-                    if len(pts) > 0:
-                        occ_pcd.points = o3d.utility.Vector3dVector(pts)
-                        if "colors" in data and data["colors"] is not None:
-                            occ_pcd.colors = o3d.utility.Vector3dVector(data["colors"])
-                        else:
-                            occ_pcd.paint_uniform_color([0.0, 1.0, 0.0])
+                    # Generic point cloud (from local mapping mode)
+                    if "points" in data and data["points"] is not None:
+                        pts = data["points"]
+                        if len(pts) > 0:
+                            occ_pcd.points = o3d.utility.Vector3dVector(pts)
+                            if "colors" in data and data["colors"] is not None:
+                                occ_pcd.colors = o3d.utility.Vector3dVector(data["colors"])
+                            else:
+                                occ_pcd.paint_uniform_color([0.0, 1.0, 0.0])
 
             except Exception:
                 # Queue empty or error
                 break
 
+        # Process latest RobotState if available
+        if latest_state is not None:
+            state = latest_state
+
+            # Update robot base frame
+            T_odom_base = state.get_T_odom_base()
+            T_delta = T_odom_base @ np.linalg.inv(prev_robot_T)
+            robot_frame.transform(T_delta)
+            prev_robot_T = T_odom_base.copy()
+
+            # Update camera frames
+            if show_camera_frames:
+                # Depth camera frame
+                T_odom_depth = state.get_T_odom_depth_cam()
+                if T_odom_depth is not None:
+                    T_delta = T_odom_depth @ np.linalg.inv(prev_depth_T)
+                    depth_cam_frame.transform(T_delta)
+                    prev_depth_T = T_odom_depth.copy()
+
+                # Teleop left camera frame
+                T_odom_teleop_left = state.get_T_odom_teleop_left()
+                if T_odom_teleop_left is not None:
+                    T_delta = T_odom_teleop_left @ np.linalg.inv(prev_teleop_left_T)
+                    teleop_left_frame.transform(T_delta)
+                    prev_teleop_left_T = T_odom_teleop_left.copy()
+
+                # Teleop right camera frame
+                T_odom_teleop_right = state.get_T_odom_teleop_right()
+                if T_odom_teleop_right is not None:
+                    T_delta = T_odom_teleop_right @ np.linalg.inv(prev_teleop_right_T)
+                    teleop_right_frame.transform(T_delta)
+                    prev_teleop_right_T = T_odom_teleop_right.copy()
+
+            # Unproject RGBD to point cloud in world frame
+            if show_pointcloud and state.has_depth() and state.has_depth_calibration():
+                try:
+                    # Build intrinsics dict for rgbd_to_pointcloud
+                    K = state.depth_intrinsics
+                    intrinsics_dict = {
+                        "K": K,
+                        "width": state.rgb.shape[1],
+                        "height": state.rgb.shape[0],
+                    }
+
+                    # Create point cloud in camera frame
+                    pcd_camera = rgbd_to_pointcloud(
+                        state.rgb,
+                        state.depth,
+                        intrinsics_dict,
+                        depth_scale=depth_scale,
+                        depth_trunc=depth_trunc,
+                    )
+
+                    # Transform to odom/world frame
+                    T_odom_depth = state.get_T_odom_depth_cam()
+                    if T_odom_depth is not None and len(pcd_camera.points) > 0:
+                        pcd_camera.transform(T_odom_depth)
+                        occ_pcd.points = pcd_camera.points
+                        occ_pcd.colors = pcd_camera.colors
+
+                except Exception:
+                    # Silently ignore point cloud errors (may happen on first frames)
+                    pass
+
+            # Display camera images with Matplotlib (single canvas)
+            if show_images and fig is not None:
+                try:
+                    # RGB image from depth camera (images come in BGR, convert to RGB)
+                    if state.rgb is not None:
+                        rgb_display = state.rgb
+                        if len(rgb_display.shape) == 3 and rgb_display.shape[2] == 3:
+                            # Convert BGR to RGB for matplotlib
+                            rgb_rgb = cv2.cvtColor(rgb_display, cv2.COLOR_BGR2RGB)
+                        else:
+                            rgb_rgb = rgb_display
+                        im_rgb.set_data(rgb_rgb)
+
+                    # Depth image (colorized)
+                    if state.depth is not None:
+                        depth_img = state.depth.copy()
+                        # Apply depth scale to get meters
+                        if depth_scale != 1.0:
+                            depth_meters = depth_img * depth_scale
+                        else:
+                            depth_meters = depth_img
+                        # Normalize for visualization (0 to depth_trunc meters)
+                        depth_norm = np.clip(depth_meters / depth_trunc, 0, 1)
+                        depth_uint8 = (depth_norm * 255).astype(np.uint8)
+                        im_depth.set_data(depth_uint8)
+
+                    # Teleop left camera (BGR to RGB)
+                    if state.teleop_left is not None:
+                        teleop_left_display = state.teleop_left
+                        if len(teleop_left_display.shape) == 3 and teleop_left_display.shape[2] == 3:
+                            teleop_left_rgb = cv2.cvtColor(teleop_left_display, cv2.COLOR_BGR2RGB)
+                        else:
+                            teleop_left_rgb = teleop_left_display
+                        im_teleop_left.set_data(teleop_left_rgb)
+
+                    # Teleop right camera (BGR to RGB)
+                    if state.teleop_right is not None:
+                        teleop_right_display = state.teleop_right
+                        if len(teleop_right_display.shape) == 3 and teleop_right_display.shape[2] == 3:
+                            teleop_right_rgb = cv2.cvtColor(teleop_right_display, cv2.COLOR_BGR2RGB)
+                        else:
+                            teleop_right_rgb = teleop_right_display
+                        im_teleop_right.set_data(teleop_right_rgb)
+
+                    # Update matplotlib figure
+                    fig.canvas.draw_idle()
+                    fig.canvas.flush_events()
+
+                    # Check if figure was closed
+                    if not plt.fignum_exists(fig.number):
+                        stop_event.set()
+                        break
+
+                except Exception:
+                    # Ignore matplotlib errors
+                    pass
+
+        # Update trajectory visualization
+        if show_trajectory and len(trajectory) > 0:
+            traj_pcd.points = o3d.utility.Vector3dVector(trajectory)
+            traj_pcd.paint_uniform_color([0.0, 0.5, 0.5])  # Cyan
+
         # Update visualization
         vis.update_geometry(robot_frame)
+        if show_camera_frames:
+            vis.update_geometry(depth_cam_frame)
+            vis.update_geometry(teleop_left_frame)
+            vis.update_geometry(teleop_right_frame)
         if show_trajectory:
             vis.update_geometry(traj_pcd)
         if show_pointcloud:
@@ -396,4 +395,6 @@ def vis_process(
             time.sleep(interval - elapsed)
 
     vis.destroy_window()
+    if show_images and fig is not None:
+        plt.close(fig)
     print("[VIS PROCESS] Visualization process stopped")
