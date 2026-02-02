@@ -222,3 +222,5 @@ rgbd_odom_recordings
 colmap*
 *.db
 MobileSAM
+third_party
+
