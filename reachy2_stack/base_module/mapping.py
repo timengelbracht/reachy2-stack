@@ -3,7 +3,8 @@
 import time
 import threading
 import zlib
-from typing import Optional, Dict, Any
+from queue import Queue
+from typing import Optional, Dict, Any, Union
 
 import numpy as np
 import open3d as o3d
@@ -452,3 +453,196 @@ def mapping_loop_client(
     socket.close()
     context.term()
     print("[MAPPING CLIENT] Mapping client loop stopped")
+
+
+def mapping_loop_unified(
+    state_queue: "Queue",
+    result_queue: "Queue",
+    stop_event: "Union[threading.Event, Any]",
+    mode: str = "server",
+    server_host: str = "localhost",
+    server_port: int = 5555,
+    hz: float = 2.0,
+    timeout_ms: int = 5000,
+    depth_scale: float = 0.001,
+    depth_trunc: float = 3.5,
+) -> None:
+    """Unified mapping loop that processes RobotState from a queue.
+
+    This is the new-style mapping loop that:
+    1. Reads RobotState objects from state_queue
+    2. Processes using either local or server mode
+    3. Outputs results to result_queue for visualization
+
+    Modes:
+        - "local": CPU-bound pointcloud generation (blocks GIL)
+        - "server": I/O-bound ZMQ to wavemap server (parallel-friendly)
+
+    Args:
+        state_queue: Queue of RobotState objects
+        result_queue: Queue for output results (for visualization)
+        stop_event: Event to signal loop termination
+        mode: "local" or "server"
+        server_host: Wavemap server hostname (for server mode)
+        server_port: Wavemap server port (for server mode)
+        hz: Processing rate in Hz
+        timeout_ms: ZMQ timeout in milliseconds (for server mode)
+        depth_scale: Scale factor to convert depth to meters
+        depth_trunc: Maximum depth in meters (for local mode)
+    """
+    from queue import Empty, Full
+    from .robot_state import RobotState
+    from .utils import rgbd_to_pointcloud
+
+    interval = 1.0 / hz
+    print(f"[MAPPING UNIFIED] Starting in {mode} mode at {hz} Hz")
+
+    # Initialize based on mode
+    socket = None
+    context = None
+
+    if mode == "server":
+        import zmq
+
+        context = zmq.Context()
+        socket = context.socket(zmq.REQ)
+        socket.connect(f"tcp://{server_host}:{server_port}")
+        socket.setsockopt(zmq.RCVTIMEO, timeout_ms)
+        socket.setsockopt(zmq.SNDTIMEO, timeout_ms)
+        print(f"[MAPPING UNIFIED] Connected to server at {server_host}:{server_port}")
+
+    latest_state: Optional[RobotState] = None
+    frame_count = 0
+
+    while not stop_event.is_set():
+        t0 = time.time()
+
+        # Drain state queue to get latest
+        while True:
+            try:
+                latest_state = state_queue.get_nowait()
+            except Empty:
+                break
+
+        if latest_state is None or not latest_state.has_depth():
+            time.sleep(0.1)
+            continue
+
+        state = latest_state
+        frame_count += 1
+
+        try:
+            if mode == "server":
+                # === SERVER MODE (I/O - releases GIL) ===
+                T_world_cam = state.get_pose()
+
+                # Prepare intrinsics dict
+                intrinsics = None
+                if state.intrinsics is not None:
+                    intrinsics = {"K": state.intrinsics}
+
+                # Scale depth to meters
+                depth_meters = state.depth.astype(np.float32) * depth_scale
+
+                # Pack and send request
+                request = MappingMessage.pack_request(
+                    rgb=state.rgb,
+                    depth=depth_meters,
+                    T_world_cam=T_world_cam,
+                    timestamp=state.timestamp,
+                    intrinsics=intrinsics,
+                    compress=True,
+                )
+                socket.send(request)
+
+                # Wait for response (I/O - releases GIL)
+                response_data = socket.recv()
+                result = MappingMessage.unpack_response(response_data)
+
+                if result["success"]:
+                    # Queue result for visualization
+                    try:
+                        result_queue.put_nowait({
+                            "occupied_points": np.array(result["occupied_points"], dtype=np.float32),
+                            "free_points": np.array(result["free_points"], dtype=np.float32),
+                            "occupied_colors": np.array(result["occupied_colors"], dtype=np.uint8),
+                            "state": state,
+                        })
+                    except Full:
+                        pass
+
+                    if frame_count % 10 == 0:
+                        print(
+                            f"[MAPPING UNIFIED] Frame {frame_count}: "
+                            f"{len(result['occupied_points'])} occupied voxels"
+                        )
+
+            else:
+                # === LOCAL MODE (CPU - holds GIL) ===
+                # Build intrinsics dict for rgbd_to_pointcloud
+                if state.intrinsics is None:
+                    print("[MAPPING UNIFIED] Warning: No intrinsics available")
+                    time.sleep(interval)
+                    continue
+
+                K = state.intrinsics
+                intrinsics = {
+                    "K": K,
+                    "width": state.rgb.shape[1],
+                    "height": state.rgb.shape[0],
+                }
+
+                # Generate point cloud
+                pcd = rgbd_to_pointcloud(
+                    state.rgb,
+                    state.depth,
+                    intrinsics,
+                    depth_scale=depth_scale,
+                    depth_trunc=depth_trunc,
+                )
+
+                if len(pcd.points) > 0:
+                    # Transform to world/odom frame
+                    pcd.transform(state.get_pose())
+
+                    # Queue result
+                    try:
+                        result_queue.put_nowait({
+                            "points": np.asarray(pcd.points),
+                            "colors": np.asarray(pcd.colors),
+                            "state": state,
+                        })
+                    except Full:
+                        pass
+
+                    if frame_count % 10 == 0:
+                        print(f"[MAPPING UNIFIED] Frame {frame_count}: {len(pcd.points)} points")
+
+        except Exception as e:
+            print(f"[MAPPING UNIFIED] Error: {e}")
+            import traceback
+            traceback.print_exc()
+
+            # Reset socket on error (server mode)
+            if mode == "server" and socket is not None:
+                import zmq
+                try:
+                    socket.close()
+                except:
+                    pass
+                socket = context.socket(zmq.REQ)
+                socket.connect(f"tcp://{server_host}:{server_port}")
+                socket.setsockopt(zmq.RCVTIMEO, timeout_ms)
+                socket.setsockopt(zmq.SNDTIMEO, timeout_ms)
+
+        # Rate limit
+        elapsed = time.time() - t0
+        if elapsed < interval:
+            time.sleep(interval - elapsed)
+
+    # Cleanup
+    if socket is not None:
+        socket.close()
+    if context is not None:
+        context.term()
+    print("[MAPPING UNIFIED] Mapping loop stopped")

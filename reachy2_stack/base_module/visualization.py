@@ -2,6 +2,8 @@
 
 import time
 import threading
+from multiprocessing import Queue as MPQueue
+from multiprocessing.synchronize import Event as MPEvent
 
 import numpy as np
 import open3d as o3d
@@ -211,3 +213,187 @@ def open3d_vis_loop(
 
     vis.destroy_window()
     print("\n[VIS] Open3D window closed")
+
+
+def vis_process(
+    vis_queue: "MPQueue",
+    stop_event: "MPEvent",
+    fps: int = 30,
+    show_trajectory: bool = True,
+    show_pointcloud: bool = True,
+    coord_frame_size: float = 0.5,
+    grid_size: float = 50.0,
+    grid_div: int = 50,
+) -> None:
+    """Visualization in a separate process.
+
+    Reads from vis_queue and renders with Open3D.
+    This function is designed to run in a separate process
+    (via multiprocessing.Process) so it has its own GIL and
+    doesn't block I/O threads.
+
+    Args:
+        vis_queue: multiprocessing.Queue containing dicts with:
+            - 'odom_x', 'odom_y', 'odom_theta': odometry updates
+            - 'occupied_points', 'occupied_colors': occupied voxels
+            - 'free_points': free voxels
+            - 'points', 'colors': generic point cloud
+        stop_event: multiprocessing.Event to signal shutdown
+        fps: Target rendering frame rate
+        show_trajectory: Show odometry trajectory trail
+        show_pointcloud: Show point clouds from mapping
+        coord_frame_size: Size of coordinate frame axes
+        grid_size: Size of ground grid in meters
+        grid_div: Number of grid divisions
+    """
+    # Import inside process to avoid serialization issues
+    import open3d as o3d
+    import numpy as np
+
+    print("[VIS PROCESS] Starting visualization process")
+
+    vis = o3d.visualization.Visualizer()
+    vis.create_window("Reachy Visualization", width=1280, height=720)
+
+    # Create geometries
+    origin_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=coord_frame_size)
+    robot_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(size=coord_frame_size)
+    traj_pcd = o3d.geometry.PointCloud()
+    occ_pcd = o3d.geometry.PointCloud()
+    free_pcd = o3d.geometry.PointCloud()
+
+    # Create ground grid
+    lines = []
+    points = []
+    height = -0.1
+    for i in range(grid_div + 1):
+        t = -grid_size / 2 + i * grid_size / grid_div
+        points.append([-grid_size / 2, t, height])
+        points.append([grid_size / 2, t, height])
+        lines.append([len(points) - 2, len(points) - 1])
+        points.append([t, -grid_size / 2, height])
+        points.append([t, grid_size / 2, height])
+        lines.append([len(points) - 2, len(points) - 1])
+
+    grid_lines = o3d.geometry.LineSet()
+    grid_lines.points = o3d.utility.Vector3dVector(np.array(points))
+    grid_lines.lines = o3d.utility.Vector2iVector(np.array(lines))
+    grid_lines.paint_uniform_color([0.3, 0.3, 0.3])
+
+    # Add geometries
+    vis.add_geometry(origin_frame)
+    vis.add_geometry(robot_frame)
+    vis.add_geometry(grid_lines)
+    if show_trajectory:
+        vis.add_geometry(traj_pcd)
+    if show_pointcloud:
+        vis.add_geometry(occ_pcd)
+        vis.add_geometry(free_pcd)
+
+    # Set up view
+    ctr = vis.get_view_control()
+    ctr.change_field_of_view(step=20.0)
+    ctr.set_zoom(0.1)
+    ctr.set_front([0.3, 0.3, 0.9])
+    ctr.set_lookat([0, 0, 0])
+    ctr.set_up([0, 0, 1])
+
+    # Render options
+    render_opt = vis.get_render_option()
+    render_opt.background_color = np.asarray([0.1, 0.1, 0.1])
+    render_opt.point_size = 2.0
+
+    trajectory = []
+    interval = 1.0 / fps
+    prev_robot_T = np.eye(4)
+
+    print("[VIS PROCESS] Visualization ready")
+
+    while not stop_event.is_set():
+        t0 = time.time()
+
+        # Drain queue (get all pending updates)
+        updates_processed = 0
+        while True:
+            try:
+                data = vis_queue.get_nowait()
+                updates_processed += 1
+
+                # Update trajectory from odometry
+                if "odom_x" in data and data["odom_x"] is not None:
+                    trajectory.append([data["odom_x"], data["odom_y"], 0.0])
+                    if len(trajectory) > 500:
+                        trajectory.pop(0)
+
+                    if show_trajectory and len(trajectory) > 0:
+                        traj_pcd.points = o3d.utility.Vector3dVector(trajectory)
+                        traj_pcd.paint_uniform_color([0.0, 0.5, 0.5])  # Cyan
+
+                    # Update robot frame position
+                    theta_rad = np.deg2rad(data.get("odom_theta", 0))
+                    new_T = np.eye(4)
+                    new_T[0, 0] = np.cos(theta_rad)
+                    new_T[0, 1] = -np.sin(theta_rad)
+                    new_T[1, 0] = np.sin(theta_rad)
+                    new_T[1, 1] = np.cos(theta_rad)
+                    new_T[0, 3] = data["odom_x"]
+                    new_T[1, 3] = data["odom_y"]
+
+                    T_delta = new_T @ np.linalg.inv(prev_robot_T)
+                    robot_frame.transform(T_delta)
+                    prev_robot_T = new_T.copy()
+
+                # Update occupied point cloud
+                if "occupied_points" in data and data["occupied_points"] is not None:
+                    pts = data["occupied_points"]
+                    if len(pts) > 0:
+                        occ_pcd.points = o3d.utility.Vector3dVector(pts)
+                        if "occupied_colors" in data and data["occupied_colors"] is not None:
+                            colors = data["occupied_colors"]
+                            if colors.dtype == np.uint8:
+                                colors = colors.astype(np.float64) / 255.0
+                            occ_pcd.colors = o3d.utility.Vector3dVector(colors)
+                        else:
+                            occ_pcd.paint_uniform_color([0.0, 1.0, 0.0])  # Green
+
+                # Update free point cloud
+                if "free_points" in data and data["free_points"] is not None:
+                    pts = data["free_points"]
+                    if len(pts) > 0:
+                        free_pcd.points = o3d.utility.Vector3dVector(pts)
+                        free_pcd.paint_uniform_color([0.5, 0.5, 0.5])  # Gray
+
+                # Generic point cloud (from local mapping mode)
+                if "points" in data and data["points"] is not None:
+                    pts = data["points"]
+                    if len(pts) > 0:
+                        occ_pcd.points = o3d.utility.Vector3dVector(pts)
+                        if "colors" in data and data["colors"] is not None:
+                            occ_pcd.colors = o3d.utility.Vector3dVector(data["colors"])
+                        else:
+                            occ_pcd.paint_uniform_color([0.0, 1.0, 0.0])
+
+            except Exception:
+                # Queue empty or error
+                break
+
+        # Update visualization
+        vis.update_geometry(robot_frame)
+        if show_trajectory:
+            vis.update_geometry(traj_pcd)
+        if show_pointcloud:
+            vis.update_geometry(occ_pcd)
+            vis.update_geometry(free_pcd)
+
+        if not vis.poll_events():
+            stop_event.set()
+            break
+        vis.update_renderer()
+
+        # Rate limit
+        elapsed = time.time() - t0
+        if elapsed < interval:
+            time.sleep(interval - elapsed)
+
+    vis.destroy_window()
+    print("[VIS PROCESS] Visualization process stopped")
