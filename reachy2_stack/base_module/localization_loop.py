@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 import zlib
 from queue import Queue, Empty, Full
-from typing import Optional, Dict, Any, Union, Tuple
+from typing import Optional, Dict, Any, Union, Tuple, TYPE_CHECKING
 from threading import Event as ThreadEvent
 from multiprocessing import Event as MPEvent
 
@@ -14,6 +14,10 @@ import msgpack
 import msgpack_numpy as m
 
 from .robot_state import RobotState
+
+if TYPE_CHECKING:
+    from .camera_pose_buffer import CameraPoseBuffer
+    from .localization_fusion import LocalizationFusion
 
 # Enable msgpack-numpy for efficient numpy array serialization
 m.patch()
@@ -135,8 +139,9 @@ class LocalizationMessage:
             "odom_x": robot_state.odom_x,
             "odom_y": robot_state.odom_y,
             "odom_theta": robot_state.odom_theta,
-            # The key output: world frame pose
+            # The key outputs: world frame poses
             "T_world_base": robot_state.T_world_base,
+            "T_world_cam": robot_state.T_world_cam,  # Camera pose from localization
             # Forward calibration data
             "depth_intrinsics": robot_state.depth_intrinsics,
             "depth_extrinsics": robot_state.depth_extrinsics,
@@ -198,8 +203,9 @@ class LocalizationMessage:
             teleop_left_extrinsics=msg.get("teleop_left_extrinsics"),
             teleop_right_intrinsics=msg.get("teleop_right_intrinsics"),
             teleop_right_extrinsics=msg.get("teleop_right_extrinsics"),
-            # The key output: world frame pose
+            # The key outputs: world frame poses
             T_world_base=msg.get("T_world_base"),
+            T_world_cam=msg.get("T_world_cam"),  # Camera pose from localization
         )
 
         return state, True, ""
@@ -214,6 +220,9 @@ def localization_loop(
     hz: float = 10.0,
     timeout_ms: int = 5000,
     include_images: bool = True,
+    camera_buffer: Optional["CameraPoseBuffer"] = None,
+    fusion: Optional["LocalizationFusion"] = None,
+    use_offset_correction: bool = True,
 ) -> None:
     """Localization loop that communicates with localization server.
 
@@ -221,7 +230,15 @@ def localization_loop(
     1. Reads RobotState from state_queue
     2. Sends to localization server via ZeroMQ
     3. Receives localized RobotState with T_world_base
-    4. Outputs to localized_queue
+    4. Applies offset correction (if enabled) for delayed measurements
+    5. Outputs to localized_queue
+
+    Offset Correction:
+    Visual localization returns poses for images captured in the past. Without
+    correction, this causes pose jumps. When use_offset_correction=True:
+    - Look up camera pose at keyframe time from camera_buffer
+    - Compute world-odom offset: T_world_odom = T_world_cam @ inv(T_odom_cam)
+    - Apply offset to current odometry for smooth pose output
 
     GIL behavior:
     - socket.send() and socket.recv() RELEASE the GIL (ZeroMQ C extension I/O)
@@ -237,6 +254,12 @@ def localization_loop(
         hz: Processing rate in Hz
         timeout_ms: ZeroMQ receive/send timeout in milliseconds
         include_images: Whether to send images to server (needed for visual localization)
+        camera_buffer: Optional buffer for looking up camera poses at past timestamps.
+            Required when use_offset_correction=True.
+        fusion: Optional LocalizationFusion instance for offset correction.
+            Required when use_offset_correction=True.
+        use_offset_correction: Whether to apply offset correction for delayed
+            localization results. If True, requires camera_buffer and fusion.
     """
     import zmq
 
@@ -368,9 +391,61 @@ def localization_loop(
             )
 
             if success and localized_state is not None:
+                output_state = localized_state
+
+                # Apply offset correction if enabled
+                # Server returns T_world_cam directly (camera pose in world frame)
+                if (
+                    use_offset_correction
+                    and camera_buffer is not None
+                    and fusion is not None
+                    and localized_state.T_world_cam is not None
+                ):
+                    from .localization_fusion import LocalizationResult
+
+                    # Create localization result using T_world_cam directly
+                    result = LocalizationResult(
+                        timestamp_keyframe=localized_state.timestamp,
+                        timestamp_received=time.time(),
+                        T_world_cam_keyframe=localized_state.T_world_cam,
+                    )
+
+                    fusion_updated = fusion.update_from_localization(result)
+
+                    # Get current camera pose from buffer and apply offset
+                    current_pose = camera_buffer.get_latest()
+                    if current_pose is not None and fusion.is_initialized:
+                        T_world_base_now = fusion.get_T_world_base(
+                            current_pose.T_odom_base
+                        )
+
+                        # Create output state with CURRENT timestamp and corrected pose
+                        output_state = RobotState(
+                            timestamp=current_pose.timestamp,
+                            odom_x=localized_state.odom_x,
+                            odom_y=localized_state.odom_y,
+                            odom_theta=localized_state.odom_theta,
+                            T_world_base=T_world_base_now,
+                            # Forward calibration data
+                            depth_intrinsics=localized_state.depth_intrinsics,
+                            depth_extrinsics=localized_state.depth_extrinsics,
+                            teleop_left_intrinsics=localized_state.teleop_left_intrinsics,
+                            teleop_left_extrinsics=localized_state.teleop_left_extrinsics,
+                            teleop_right_intrinsics=localized_state.teleop_right_intrinsics,
+                            teleop_right_extrinsics=localized_state.teleop_right_extrinsics,
+                        )
+
+                        if frame_count % 20 == 0 and fusion_updated:
+                            latency = result.latency
+                            stats = fusion.get_stats()
+                            print(
+                                f"[LOCALIZATION] Offset correction applied: "
+                                f"latency={latency:.2f}s, updates={stats.update_count}"
+                            )
+
                 # Output to queue
                 try:
-                    localized_queue.put_nowait(localized_state)
+                    localized_queue.put_nowait(output_state)
                 except Full:
                     pass  # Drop if queue full
 
@@ -378,7 +453,7 @@ def localization_loop(
                 error_count = 0
 
                 if frame_count % 20 == 0:
-                    T = localized_state.T_world_base
+                    T = output_state.T_world_base
                     if T is not None:
                         pos = T[:3, 3]
                         print(

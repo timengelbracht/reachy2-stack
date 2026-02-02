@@ -13,6 +13,10 @@ from .map_state import MapState
 from .mapping_loop import mapping_loop
 from .localization_loop import localization_loop
 
+# Localization fusion components
+from .camera_pose_buffer import CameraPoseBuffer, CameraPoseStamped
+from .localization_fusion import LocalizationFusion, LocalizationResult, FusionStats
+
 __all__ = [
     # Legacy (backwards compatible)
     "camera_loop",
@@ -28,4 +32,10 @@ __all__ = [
     "mapping_loop",
     "localization_loop",
     "vis_process",
+    # Localization fusion
+    "CameraPoseBuffer",
+    "CameraPoseStamped",
+    "LocalizationFusion",
+    "LocalizationResult",
+    "FusionStats",
 ]

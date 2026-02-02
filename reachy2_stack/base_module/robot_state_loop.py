@@ -14,6 +14,7 @@ from .robot_state import RobotState
 
 if TYPE_CHECKING:
     from reachy2_stack.core.client import ReachyClient
+    from .camera_pose_buffer import CameraPoseBuffer
 
 
 def robot_state_loop(
@@ -23,6 +24,7 @@ def robot_state_loop(
     hz: int = 20,
     grab_depth: bool = True,
     grab_teleop: bool = False,
+    camera_buffer: Optional["CameraPoseBuffer"] = None,
 ) -> None:
     """Unified sensor acquisition loop.
 
@@ -37,6 +39,9 @@ def robot_state_loop(
         hz: Acquisition rate in Hz
         grab_depth: Whether to grab depth camera frames
         grab_teleop: Whether to grab teleop camera frames
+        camera_buffer: Optional buffer for storing camera poses with timestamps.
+            Used for delayed localization fusion. If provided, camera poses
+            are pushed to the buffer after each acquisition.
     """
     reachy = client.connect_reachy
     interval = 1.0 / hz
@@ -101,6 +106,16 @@ def robot_state_loop(
 
             except Exception as e:
                 print(f"[ROBOT_STATE] Depth camera error: {e}")
+
+        # === Push camera pose to buffer (for localization fusion) ===
+        if camera_buffer is not None and T_base_depth is not None:
+            try:
+                # Compute camera pose in odom frame: T_odom_cam = T_odom_base @ T_base_cam
+                T_odom_base = state.get_T_odom_base()
+                T_odom_cam = T_odom_base @ T_base_depth
+                camera_buffer.push(state.timestamp, T_odom_cam, T_odom_base)
+            except Exception as e:
+                print(f"[ROBOT_STATE] Camera buffer push error: {e}")
 
         # === Teleop cameras (optional, I/O - releases GIL) ===
         if grab_teleop:

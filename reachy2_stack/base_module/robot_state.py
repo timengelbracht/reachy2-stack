@@ -42,6 +42,7 @@ class RobotState:
 
     # Computed pose (if using world frame via visual localization)
     T_world_base: Optional[np.ndarray] = None  # (4, 4)
+    T_world_cam: Optional[np.ndarray] = None  # (4, 4) - camera pose from localization
 
     # Backward compatibility alias
     @property
