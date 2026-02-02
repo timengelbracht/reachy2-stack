@@ -15,7 +15,7 @@ If you already cloned without `--recursive`:
 
 git submodule update --init --recursive
 
----
+----
 
 ### 2. Open in VS Code Devcontainer
 
