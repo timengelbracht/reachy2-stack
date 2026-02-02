@@ -20,7 +20,7 @@ from typing import Optional, Tuple
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from reachy2_stack.base_module.mapping import MappingMessage
+from reachy2_stack.base_module.mapping_loop import MappingMessage
 
 try:
     from advanced_mapping.wavemap import WaveMapper

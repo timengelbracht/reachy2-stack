@@ -9,6 +9,8 @@ from .utils import create_coordinate_frame, pose_to_transform, rgbd_to_pointclou
 # New unified components
 from .robot_state import RobotState
 from .robot_state_loop import robot_state_loop
+from .map_state import MapState
+from .mapping_loop import mapping_loop
 
 __all__ = [
     # Legacy (backwards compatible)
@@ -21,5 +23,7 @@ __all__ = [
     # New unified components
     "RobotState",
     "robot_state_loop",
+    "MapState",
+    "mapping_loop",
     "vis_process",
 ]

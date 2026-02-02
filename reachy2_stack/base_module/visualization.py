@@ -60,6 +60,7 @@ def vis_process(
     matplotlib.use('TkAgg')  # Use TkAgg backend for interactive display
     import matplotlib.pyplot as plt
     from .robot_state import RobotState
+    from .map_state import MapState
 
     print("[VIS PROCESS] Starting visualization process")
 
@@ -180,6 +181,7 @@ def vis_process(
 
         # Drain queue (get all pending updates)
         latest_state = None
+        latest_map_state = None
         while True:
             try:
                 data = vis_queue.get_nowait()
@@ -191,6 +193,30 @@ def vis_process(
                     trajectory.append([data.odom_x, data.odom_y, 0.0])
                     if len(trajectory) > 500:
                         trajectory.pop(0)
+
+                # Check if it's a MapState object
+                elif isinstance(data, MapState):
+                    latest_map_state = data
+                    # Update trajectory from MapState's robot_state if available
+                    if data.robot_state is not None:
+                        trajectory.append([data.robot_state.odom_x, data.robot_state.odom_y, 0.0])
+                        if len(trajectory) > 500:
+                            trajectory.pop(0)
+
+                    # Update occupied point cloud from wavemap server
+                    if data.has_map():
+                        occ_pcd.points = o3d.utility.Vector3dVector(data.occupied_points)
+                        if data.occupied_colors is not None and len(data.occupied_colors) > 0:
+                            colors = data.occupied_colors.astype(np.float64) / 255.0
+                            occ_pcd.colors = o3d.utility.Vector3dVector(colors)
+                        else:
+                            occ_pcd.paint_uniform_color([0.0, 1.0, 0.0])
+
+                    # Update free point cloud from wavemap server
+                    if data.has_free_space():
+                        free_pcd.points = o3d.utility.Vector3dVector(data.free_points)
+                        free_pcd.paint_uniform_color([0.5, 0.5, 0.5])
+
                 else:
                     # Dict format (backward compatibility)
                     if "odom_x" in data and data["odom_x"] is not None:
@@ -245,6 +271,11 @@ def vis_process(
             except Exception:
                 # Queue empty or error
                 break
+
+        # If we got a MapState with robot_state, use that for frame updates
+        if latest_map_state is not None and latest_map_state.robot_state is not None:
+            if latest_state is None:
+                latest_state = latest_map_state.robot_state
 
         # Process latest RobotState if available
         if latest_state is not None:

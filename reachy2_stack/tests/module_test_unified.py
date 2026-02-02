@@ -1,18 +1,27 @@
 #!/usr/bin/env python3
-"""Unified test script for robot_state_loop and vis_process.
+"""Unified test script for robot_state_loop, mapping_loop, and vis_process.
 
 This script tests:
 - robot_state_thread: Unified camera + odometry -> RobotState queue
+- mapping_thread: Sends RGBD to wavemap server, outputs MapState
 - teleop_thread: Keyboard control
-- vis_process: Visualization with Open3D (3D) and OpenCV (images)
+- vis_process: Visualization with Open3D (3D) and Matplotlib (images)
 
-The vis_process receives RobotState objects directly and:
-- Shows all camera image frames (RGB, depth, teleop)
-- Visualizes RGBD point cloud in world frame using intrinsics and camera pose
+Architecture:
+    robot_state_loop ──► RobotState ──┬──► vis_process (images, trajectory)
+                                      │
+                                      └──► mapping_loop ──► MapState ──► vis_process (point clouds)
 
 Usage:
+    # Without mapping (just camera + vis)
     python reachy2_stack/tests/module_test_unified.py
-    python reachy2_stack/tests/module_test_unified.py --teleop  # Enable teleop cameras
+
+    # With mapping (requires wavemap server running)
+    python ext_server/wavemap_server.py --port 5555  # Terminal 1
+    python reachy2_stack/tests/module_test_unified.py --mapping  # Terminal 2
+
+    # Enable teleop cameras
+    python reachy2_stack/tests/module_test_unified.py --mapping --teleop
 """
 
 import argparse
@@ -25,6 +34,7 @@ from reachy2_stack.utils.utils_dataclass import ReachyConfig
 from reachy2_stack.core.client import ReachyClient
 from reachy2_stack.base_module import teleop_loop
 from reachy2_stack.base_module.robot_state_loop import robot_state_loop
+from reachy2_stack.base_module.mapping_loop import mapping_loop
 from reachy2_stack.base_module.visualization import vis_process
 
 # ---------------- CONFIG ----------------
@@ -38,6 +48,11 @@ CMD_HZ = 30
 VX = 0.6
 VY = 0.6
 WZ = 110.0
+
+# Mapping
+MAPPING_HZ = 2.0  # Hz for mapping requests
+MAPPING_SERVER_HOST = "localhost"
+MAPPING_SERVER_PORT = 5555
 
 # Visualization
 VIS_FPS = 10
@@ -60,6 +75,28 @@ def main() -> None:
         help="Enable teleop cameras",
     )
     parser.add_argument(
+        "--mapping",
+        action="store_true",
+        help="Enable mapping (requires wavemap server)",
+    )
+    parser.add_argument(
+        "--server-host",
+        default=MAPPING_SERVER_HOST,
+        help="Wavemap server host",
+    )
+    parser.add_argument(
+        "--server-port",
+        type=int,
+        default=MAPPING_SERVER_PORT,
+        help="Wavemap server port",
+    )
+    parser.add_argument(
+        "--mapping-hz",
+        type=float,
+        default=MAPPING_HZ,
+        help="Mapping request rate (Hz)",
+    )
+    parser.add_argument(
         "--state-hz",
         type=int,
         default=STATE_HZ,
@@ -74,11 +111,15 @@ def main() -> None:
     args = parser.parse_args()
 
     print("\n" + "=" * 60)
-    print("UNIFIED MODULE TEST (robot_state_loop + vis_process)")
+    print("UNIFIED MODULE TEST")
     print("=" * 60)
     print(f"Robot host: {args.host}")
     print(f"State acquisition: {args.state_hz} Hz")
     print(f"Teleop cameras: {args.teleop}")
+    print(f"Mapping: {args.mapping}")
+    if args.mapping:
+        print(f"  Server: {args.server_host}:{args.server_port}")
+        print(f"  Rate: {args.mapping_hz} Hz")
     print(f"Visualization FPS: {args.vis_fps}")
     print("=" * 60 + "\n")
 
@@ -99,7 +140,9 @@ def main() -> None:
 
     # === Queues ===
     state_queue = Queue(maxsize=5)  # RobotState from robot_state_thread
-    vis_queue = MPQueue(maxsize=20)  # For vis process (RobotState objects)
+    mapping_state_queue = Queue(maxsize=5)  # RobotState for mapping thread
+    map_queue = Queue(maxsize=5)  # MapState from mapping thread
+    vis_queue = MPQueue(maxsize=20)  # For vis process (RobotState + MapState)
 
     # === THREADS (main process, I/O-bound) ===
     threads = [
@@ -127,6 +170,23 @@ def main() -> None:
             name="teleop",
         ),
     ]
+
+    # Add mapping thread if enabled
+    if args.mapping:
+        threads.append(
+            threading.Thread(
+                target=mapping_loop,
+                args=(mapping_state_queue, map_queue, stop_event),
+                kwargs={
+                    "server_host": args.server_host,
+                    "server_port": args.server_port,
+                    "hz": args.mapping_hz,
+                    "depth_scale": DEPTH_SCALE,
+                },
+                daemon=True,
+                name="mapping",
+            )
+        )
 
     # === PROCESS (separate GIL for visualization) ===
     vis_proc = Process(
@@ -158,19 +218,38 @@ def main() -> None:
         print("\n[MAIN] All components started")
         print("[MAIN] Press Ctrl+C to stop\n")
 
-        # Main loop: forward RobotState directly to vis process
+        # Main loop: forward RobotState and MapState to vis process
         while not stop_event.is_set():
             try:
-                # Get RobotState and forward directly to vis
+                # Get RobotState and forward to vis + mapping
                 try:
                     state = state_queue.get_nowait()
-                    # Send RobotState directly to vis process
+                    # Send RobotState to vis process (for images, trajectory)
                     try:
                         vis_queue.put_nowait(state)
                     except:
                         pass  # Queue full, drop
+
+                    # Also send to mapping thread if enabled
+                    if args.mapping:
+                        try:
+                            mapping_state_queue.put_nowait(state)
+                        except:
+                            pass  # Queue full, drop
                 except:
                     pass  # No state ready
+
+                # Get MapState from mapping and forward to vis
+                if args.mapping:
+                    try:
+                        map_state = map_queue.get_nowait()
+                        # Send MapState to vis process (for point clouds)
+                        try:
+                            vis_queue.put_nowait(map_state)
+                        except:
+                            pass  # Queue full, drop
+                    except:
+                        pass  # No map state ready
 
                 time.sleep(0.01)  # 100 Hz main loop
 
