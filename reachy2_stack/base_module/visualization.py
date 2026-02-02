@@ -10,7 +10,9 @@ from .utils import rgbd_to_pointcloud
 def vis_process(
     vis_queue: "MPQueue",
     stop_event: "MPEvent",
-    fps: int = 30,
+    fps: int = 15,
+    image_display_hz: float = 15.0,
+    map_state_hz: float = 10.0,
     show_trajectory: bool = True,
     show_pointcloud: bool = True,
     show_camera_frames: bool = True,
@@ -30,18 +32,26 @@ def vis_process(
 
     Supports both:
     - RobotState objects (new unified format with camera calibration)
+    - MapState objects (map data from wavemap server)
     - Dict format (backward compatible with existing code)
+
+    Robot frame updates (Open3D) happen immediately when data is received
+    for lowest latency. Matplotlib image updates are rate-limited separately
+    since they are slow and would block the main loop.
 
     Args:
         vis_queue: multiprocessing.Queue containing either:
             - RobotState objects (with full camera calibration)
+            - MapState objects (with occupied/free point clouds)
             - dicts with:
                 - 'odom_x', 'odom_y', 'odom_theta': odometry updates
                 - 'occupied_points', 'occupied_colors': occupied voxels
                 - 'free_points': free voxels
                 - 'points', 'colors': generic point cloud
         stop_event: multiprocessing.Event to signal shutdown
-        fps: Target rendering frame rate
+        fps: Target rendering frame rate for Open3D (default 60 for smooth updates)
+        image_display_hz: Update rate for matplotlib images (slow, default 10 Hz)
+        map_state_hz: Update rate for map state visualization (point clouds)
         show_trajectory: Show odometry trajectory trail
         show_pointcloud: Show point clouds from RGBD (in world frame)
         show_camera_frames: Show coordinate frames for all cameras
@@ -63,6 +73,7 @@ def vis_process(
     from .map_state import MapState
 
     print("[VIS PROCESS] Starting visualization process")
+    print(f"[VIS PROCESS] Open3D fps: {fps}, Image display: {image_display_hz} Hz, Map update: {map_state_hz} Hz")
 
     vis = o3d.visualization.Visualizer()
     vis.create_window("Reachy Visualization", width=1280, height=720)
@@ -97,6 +108,19 @@ def vis_process(
     grid_lines.points = o3d.utility.Vector3dVector(np.array(points))
     grid_lines.lines = o3d.utility.Vector2iVector(np.array(lines))
     grid_lines.paint_uniform_color([0.3, 0.3, 0.3])
+    
+
+    # Add invisible bounding points to expand the scene and allow more zoom out
+    # This tricks Open3D into allowing a larger zoom range
+    bounding_points = o3d.geometry.PointCloud()
+    bound_pts = np.array([
+        [-30, -30, -10],
+        [30, 30, 10],
+    ])
+    bounding_points.points = o3d.utility.Vector3dVector(bound_pts)
+    bounding_points.paint_uniform_color([0.1, 0.1, 0.1])  # Nearly invisible
+    vis.add_geometry(bounding_points) 
+
 
     # Add geometries
     vis.add_geometry(origin_frame)
@@ -120,19 +144,51 @@ def vis_process(
     ctr.set_lookat([0, 0, 0])
     ctr.set_up([0, 0, 1])
 
-    # Render options
+    # Adjust render options for better viewing
     render_opt = vis.get_render_option()
-    render_opt.background_color = np.asarray([0.1, 0.1, 0.1])
+    render_opt.background_color = np.asarray([0.1, 0.1, 0.1])  # Dark gray background
     render_opt.point_size = 2.0
+    render_opt.line_width = 2.0
+
+    # Try to set viewing frustum - check available attributes
+    try:
+        # Different Open3D versions use different names
+        if hasattr(render_opt, 'depth_far'):
+            render_opt.depth_far = 1000.0
+            print(f"[VIS] Set depth_far to 1000.0")
+        if hasattr(render_opt, 'depth_near'):
+            render_opt.depth_near = 0.01
+            print(f"[VIS] Set depth_near to 0.01")
+
+        # Debug: print available attributes
+        depth_attrs = [attr for attr in dir(render_opt) if 'depth' in attr.lower() or 'clip' in attr.lower() or 'far' in attr.lower() or 'near' in attr.lower()]
+        if depth_attrs:
+            print(f"[VIS] Available depth/clip attributes: {depth_attrs}")
+    except Exception as e:
+        print(f"[VIS] Note: Could not set depth clipping: {e}")
+
 
     trajectory = []
-    interval = 1.0 / fps
+    render_interval = 1.0 / fps
+
+    # Separate intervals for image display and map state updates
+    # Robot frame updates happen immediately (no rate limit) for lowest latency
+    image_display_interval = 1.0 / image_display_hz
+    map_state_interval = 1.0 / map_state_hz
+
+    # Track last update times
+    last_image_update = 0.0
+    last_map_state_update = 0.0
 
     # Track previous transforms for incremental updates
     prev_robot_T = np.eye(4)
     prev_depth_T = np.eye(4)
     prev_teleop_left_T = np.eye(4)
     prev_teleop_right_T = np.eye(4)
+
+    # Cached states (keep latest until next update cycle)
+    cached_robot_state = None
+    cached_map_state = None
 
     # Set up matplotlib figure for camera images (2x2 grid)
     fig = None
@@ -176,55 +232,72 @@ def vis_process(
     if show_images:
         print("[VIS PROCESS] Matplotlib image window enabled (close window to quit)")
 
+    # Flag to track if robot state was updated this iteration
+    robot_state_updated = False
+
     while not stop_event.is_set():
         t0 = time.time()
+        robot_state_updated = False
 
-        # Drain queue (get all pending updates)
-        latest_state = None
-        latest_map_state = None
+        # Drain queue and IMMEDIATELY update robot frames for lowest latency
+        # This is the key to reducing latency - don't rate-limit frame updates
         while True:
             try:
                 data = vis_queue.get_nowait()
 
                 # Check if it's a RobotState object
                 if isinstance(data, RobotState):
-                    latest_state = data
-                    # Also update trajectory from RobotState
+                    cached_robot_state = data
+                    robot_state_updated = True
+
+                    # Always update trajectory from RobotState
                     trajectory.append([data.odom_x, data.odom_y, 0.0])
                     if len(trajectory) > 500:
                         trajectory.pop(0)
 
+                    # IMMEDIATELY update robot base frame (no rate limiting!)
+                    T_odom_base = data.get_T_odom_base()
+                    T_delta = T_odom_base @ np.linalg.inv(prev_robot_T)
+                    robot_frame.transform(T_delta)
+                    prev_robot_T = T_odom_base.copy()
+
+                    # IMMEDIATELY update camera frames
+                    if show_camera_frames:
+                        T_odom_depth = data.get_T_odom_depth_cam()
+                        if T_odom_depth is not None:
+                            T_delta = T_odom_depth @ np.linalg.inv(prev_depth_T)
+                            depth_cam_frame.transform(T_delta)
+                            prev_depth_T = T_odom_depth.copy()
+
+                        T_odom_teleop_left = data.get_T_odom_teleop_left()
+                        if T_odom_teleop_left is not None:
+                            T_delta = T_odom_teleop_left @ np.linalg.inv(prev_teleop_left_T)
+                            teleop_left_frame.transform(T_delta)
+                            prev_teleop_left_T = T_odom_teleop_left.copy()
+
+                        T_odom_teleop_right = data.get_T_odom_teleop_right()
+                        if T_odom_teleop_right is not None:
+                            T_delta = T_odom_teleop_right @ np.linalg.inv(prev_teleop_right_T)
+                            teleop_right_frame.transform(T_delta)
+                            prev_teleop_right_T = T_odom_teleop_right.copy()
+
                 # Check if it's a MapState object
                 elif isinstance(data, MapState):
-                    latest_map_state = data
+                    cached_map_state = data
                     # Update trajectory from MapState's robot_state if available
                     if data.robot_state is not None:
                         trajectory.append([data.robot_state.odom_x, data.robot_state.odom_y, 0.0])
                         if len(trajectory) > 500:
                             trajectory.pop(0)
 
-                    # Update occupied point cloud from wavemap server
-                    if data.has_map():
-                        occ_pcd.points = o3d.utility.Vector3dVector(data.occupied_points)
-                        if data.occupied_colors is not None and len(data.occupied_colors) > 0:
-                            colors = data.occupied_colors.astype(np.float64) / 255.0
-                            occ_pcd.colors = o3d.utility.Vector3dVector(colors)
-                        else:
-                            occ_pcd.paint_uniform_color([0.0, 1.0, 0.0])
-
-                    # Update free point cloud from wavemap server
-                    if data.has_free_space():
-                        free_pcd.points = o3d.utility.Vector3dVector(data.free_points)
-                        free_pcd.paint_uniform_color([0.5, 0.5, 0.5])
-
                 else:
-                    # Dict format (backward compatibility)
+                    # Dict format (backward compatibility) - update immediately
                     if "odom_x" in data and data["odom_x"] is not None:
                         trajectory.append([data["odom_x"], data["odom_y"], 0.0])
                         if len(trajectory) > 500:
                             trajectory.pop(0)
 
-                        # Update robot frame position
+                        # Update robot frame position immediately
                         theta_rad = np.deg2rad(data.get("odom_theta", 0))
                         new_T = np.eye(4)
                         new_T[0, 0] = np.cos(theta_rad)
@@ -238,7 +311,7 @@ def vis_process(
                         robot_frame.transform(T_delta)
                         prev_robot_T = new_T.copy()
 
-                    # Update occupied point cloud (from external mapping)
+                    # Update point clouds from dict (backward compatibility)
                     if "occupied_points" in data and data["occupied_points"] is not None:
                         pts = data["occupied_points"]
                         if len(pts) > 0:
@@ -251,14 +324,12 @@ def vis_process(
                             else:
                                 occ_pcd.paint_uniform_color([0.0, 1.0, 0.0])
 
-                    # Update free point cloud
                     if "free_points" in data and data["free_points"] is not None:
                         pts = data["free_points"]
                         if len(pts) > 0:
                             free_pcd.points = o3d.utility.Vector3dVector(pts)
                             free_pcd.paint_uniform_color([0.5, 0.5, 0.5])
 
-                    # Generic point cloud (from local mapping mode)
                     if "points" in data and data["points"] is not None:
                         pts = data["points"]
                         if len(pts) > 0:
@@ -272,48 +343,104 @@ def vis_process(
                 # Queue empty or error
                 break
 
-        # If we got a MapState with robot_state, use that for frame updates
-        if latest_map_state is not None and latest_map_state.robot_state is not None:
-            if latest_state is None:
-                latest_state = latest_map_state.robot_state
+        current_time = time.time()
 
-        # Process latest RobotState if available
-        if latest_state is not None:
-            state = latest_state
+        # === Update matplotlib images at lower rate (slow operation) ===
+        should_update_images = (current_time - last_image_update) >= image_display_interval
 
-            # Update robot base frame
-            T_odom_base = state.get_T_odom_base()
-            T_delta = T_odom_base @ np.linalg.inv(prev_robot_T)
-            robot_frame.transform(T_delta)
-            prev_robot_T = T_odom_base.copy()
+        if should_update_images and show_images and fig is not None and cached_robot_state is not None:
+            last_image_update = current_time
+            state = cached_robot_state
 
-            # Update camera frames
-            if show_camera_frames:
-                # Depth camera frame
-                T_odom_depth = state.get_T_odom_depth_cam()
-                if T_odom_depth is not None:
-                    T_delta = T_odom_depth @ np.linalg.inv(prev_depth_T)
-                    depth_cam_frame.transform(T_delta)
-                    prev_depth_T = T_odom_depth.copy()
+            try:
+                # RGB image from depth camera (images come in BGR, convert to RGB)
+                if state.rgb is not None:
+                    rgb_display = state.rgb
+                    if len(rgb_display.shape) == 3 and rgb_display.shape[2] == 3:
+                        rgb_rgb = cv2.cvtColor(rgb_display, cv2.COLOR_BGR2RGB)
+                    else:
+                        rgb_rgb = rgb_display
+                    im_rgb.set_data(rgb_rgb)
 
-                # Teleop left camera frame
-                T_odom_teleop_left = state.get_T_odom_teleop_left()
-                if T_odom_teleop_left is not None:
-                    T_delta = T_odom_teleop_left @ np.linalg.inv(prev_teleop_left_T)
-                    teleop_left_frame.transform(T_delta)
-                    prev_teleop_left_T = T_odom_teleop_left.copy()
+                # Depth image (colorized)
+                if state.depth is not None:
+                    depth_img = state.depth.copy()
+                    if depth_scale != 1.0:
+                        depth_meters = depth_img * depth_scale
+                    else:
+                        depth_meters = depth_img
+                    depth_norm = np.clip(depth_meters / depth_trunc, 0, 1)
+                    depth_uint8 = (depth_norm * 255).astype(np.uint8)
+                    im_depth.set_data(depth_uint8)
 
-                # Teleop right camera frame
-                T_odom_teleop_right = state.get_T_odom_teleop_right()
-                if T_odom_teleop_right is not None:
-                    T_delta = T_odom_teleop_right @ np.linalg.inv(prev_teleop_right_T)
-                    teleop_right_frame.transform(T_delta)
-                    prev_teleop_right_T = T_odom_teleop_right.copy()
+                # Teleop left camera (BGR to RGB)
+                if state.teleop_left is not None:
+                    teleop_left_display = state.teleop_left
+                    if len(teleop_left_display.shape) == 3 and teleop_left_display.shape[2] == 3:
+                        teleop_left_rgb = cv2.cvtColor(teleop_left_display, cv2.COLOR_BGR2RGB)
+                    else:
+                        teleop_left_rgb = teleop_left_display
+                    im_teleop_left.set_data(teleop_left_rgb)
 
-            # Unproject RGBD to point cloud in world frame
+                # Teleop right camera (BGR to RGB)
+                if state.teleop_right is not None:
+                    teleop_right_display = state.teleop_right
+                    if len(teleop_right_display.shape) == 3 and teleop_right_display.shape[2] == 3:
+                        teleop_right_rgb = cv2.cvtColor(teleop_right_display, cv2.COLOR_BGR2RGB)
+                    else:
+                        teleop_right_rgb = teleop_right_display
+                    im_teleop_right.set_data(teleop_right_rgb)
+
+                # Update matplotlib figure (this is the slow part)
+                fig.canvas.draw_idle()
+                fig.canvas.flush_events()
+
+                # Check if figure was closed
+                if not plt.fignum_exists(fig.number):
+                    stop_event.set()
+                    break
+
+            except Exception:
+                pass
+
+        # === Process MapState at map_state_hz ===
+        should_update_map = (current_time - last_map_state_update) >= map_state_interval
+
+        if should_update_map and cached_map_state is not None:
+            map_state = cached_map_state
+            last_map_state_update = current_time
+
+            # If MapState has robot_state and we haven't processed a RobotState this cycle,
+            # use it for frame updates
+            if map_state.robot_state is not None and not robot_state_updated:
+                state = map_state.robot_state
+
+                # Update robot base frame
+                T_odom_base = state.get_T_odom_base()
+                T_delta = T_odom_base @ np.linalg.inv(prev_robot_T)
+                robot_frame.transform(T_delta)
+                prev_robot_T = T_odom_base.copy()
+
+            # Update occupied point cloud from wavemap server
+            if map_state.has_map():
+                occ_pcd.points = o3d.utility.Vector3dVector(map_state.occupied_points)
+                if map_state.occupied_colors is not None and len(map_state.occupied_colors) > 0:
+                    colors = map_state.occupied_colors.astype(np.float64) / 255.0
+                    occ_pcd.colors = o3d.utility.Vector3dVector(colors)
+                else:
+                    occ_pcd.paint_uniform_color([0.0, 1.0, 0.0])
+
+            # Update free point cloud from wavemap server
+            if map_state.has_free_space():
+                free_pcd.points = o3d.utility.Vector3dVector(map_state.free_points)
+                free_pcd.paint_uniform_color([0.5, 0.5, 0.5])
+
+        # === Unproject RGBD to point cloud (only if no MapState provides point clouds) ===
+        # This runs when robot state is updated and MapState is not providing point clouds
+        if robot_state_updated and cached_robot_state is not None and cached_map_state is None:
+            state = cached_robot_state
             if show_pointcloud and state.has_depth() and state.has_depth_calibration():
                 try:
-                    # Build intrinsics dict for rgbd_to_pointcloud
                     K = state.depth_intrinsics
                     intrinsics_dict = {
                         "K": K,
@@ -321,7 +448,6 @@ def vis_process(
                         "height": state.rgb.shape[0],
                     }
 
-                    # Create point cloud in camera frame
                     pcd_camera = rgbd_to_pointcloud(
                         state.rgb,
                         state.depth,
@@ -330,7 +456,6 @@ def vis_process(
                         depth_trunc=depth_trunc,
                     )
 
-                    # Transform to odom/world frame
                     T_odom_depth = state.get_T_odom_depth_cam()
                     if T_odom_depth is not None and len(pcd_camera.points) > 0:
                         pcd_camera.transform(T_odom_depth)
@@ -338,64 +463,6 @@ def vis_process(
                         occ_pcd.colors = pcd_camera.colors
 
                 except Exception:
-                    # Silently ignore point cloud errors (may happen on first frames)
-                    pass
-
-            # Display camera images with Matplotlib (single canvas)
-            if show_images and fig is not None:
-                try:
-                    # RGB image from depth camera (images come in BGR, convert to RGB)
-                    if state.rgb is not None:
-                        rgb_display = state.rgb
-                        if len(rgb_display.shape) == 3 and rgb_display.shape[2] == 3:
-                            # Convert BGR to RGB for matplotlib
-                            rgb_rgb = cv2.cvtColor(rgb_display, cv2.COLOR_BGR2RGB)
-                        else:
-                            rgb_rgb = rgb_display
-                        im_rgb.set_data(rgb_rgb)
-
-                    # Depth image (colorized)
-                    if state.depth is not None:
-                        depth_img = state.depth.copy()
-                        # Apply depth scale to get meters
-                        if depth_scale != 1.0:
-                            depth_meters = depth_img * depth_scale
-                        else:
-                            depth_meters = depth_img
-                        # Normalize for visualization (0 to depth_trunc meters)
-                        depth_norm = np.clip(depth_meters / depth_trunc, 0, 1)
-                        depth_uint8 = (depth_norm * 255).astype(np.uint8)
-                        im_depth.set_data(depth_uint8)
-
-                    # Teleop left camera (BGR to RGB)
-                    if state.teleop_left is not None:
-                        teleop_left_display = state.teleop_left
-                        if len(teleop_left_display.shape) == 3 and teleop_left_display.shape[2] == 3:
-                            teleop_left_rgb = cv2.cvtColor(teleop_left_display, cv2.COLOR_BGR2RGB)
-                        else:
-                            teleop_left_rgb = teleop_left_display
-                        im_teleop_left.set_data(teleop_left_rgb)
-
-                    # Teleop right camera (BGR to RGB)
-                    if state.teleop_right is not None:
-                        teleop_right_display = state.teleop_right
-                        if len(teleop_right_display.shape) == 3 and teleop_right_display.shape[2] == 3:
-                            teleop_right_rgb = cv2.cvtColor(teleop_right_display, cv2.COLOR_BGR2RGB)
-                        else:
-                            teleop_right_rgb = teleop_right_display
-                        im_teleop_right.set_data(teleop_right_rgb)
-
-                    # Update matplotlib figure
-                    fig.canvas.draw_idle()
-                    fig.canvas.flush_events()
-
-                    # Check if figure was closed
-                    if not plt.fignum_exists(fig.number):
-                        stop_event.set()
-                        break
-
-                except Exception:
-                    # Ignore matplotlib errors
                     pass
 
         # Update trajectory visualization
@@ -422,8 +489,8 @@ def vis_process(
 
         # Rate limit
         elapsed = time.time() - t0
-        if elapsed < interval:
-            time.sleep(interval - elapsed)
+        if elapsed < render_interval:
+            time.sleep(render_interval - elapsed)
 
     vis.destroy_window()
     if show_images and fig is not None:

@@ -41,7 +41,7 @@ from reachy2_stack.base_module.visualization import vis_process
 HOST = "192.168.1.71"
 
 # Robot state acquisition
-STATE_HZ = 20  # Hz for camera + odometry
+STATE_HZ = 15  # Hz for camera + odometry
 
 # Teleop
 CMD_HZ = 30
@@ -55,7 +55,7 @@ MAPPING_SERVER_HOST = "localhost"
 MAPPING_SERVER_PORT = 5555
 
 # Visualization
-VIS_FPS = 10
+VIS_FPS = 15
 DEPTH_SCALE = 0.001  # mm to meters
 DEPTH_TRUNC = 3.5  # meters
 # --------------------------------------
