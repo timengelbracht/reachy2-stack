@@ -221,3 +221,6 @@ rgbd_odom_recordings
 *.json
 colmap*
 *.db
+MobileSAM
+third_party
+
