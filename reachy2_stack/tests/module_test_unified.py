@@ -195,7 +195,7 @@ def main() -> None:
         kwargs={
             "fps": args.vis_fps,
             "show_trajectory": True,
-            "show_pointcloud": True,
+            "show_pointcloud": False,
             "show_camera_frames": True,
             "show_images": True,  # Show RGB, depth, teleop images
             "depth_scale": DEPTH_SCALE,

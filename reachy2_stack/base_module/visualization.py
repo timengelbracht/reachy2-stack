@@ -14,7 +14,7 @@ def vis_process(
     image_display_hz: float = 15.0,
     map_state_hz: float = 10.0,
     show_trajectory: bool = True,
-    show_pointcloud: bool = True,
+    show_pointcloud: bool = False,
     show_camera_frames: bool = True,
     show_images: bool = True,
     coord_frame_size: float = 0.5,

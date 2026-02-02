@@ -11,6 +11,7 @@ from .robot_state import RobotState
 from .robot_state_loop import robot_state_loop
 from .map_state import MapState
 from .mapping_loop import mapping_loop
+from .localization_loop import localization_loop
 
 __all__ = [
     # Legacy (backwards compatible)
@@ -25,5 +26,6 @@ __all__ = [
     "robot_state_loop",
     "MapState",
     "mapping_loop",
+    "localization_loop",
     "vis_process",
 ]
