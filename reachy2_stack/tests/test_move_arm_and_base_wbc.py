@@ -50,6 +50,7 @@ def main() -> int:
     client = ReachyClient(cfg)
     client.connect()
     client.turn_on_all()
+   
     
 
     # --- Create controller (no world model needed for base-frame tests) ---

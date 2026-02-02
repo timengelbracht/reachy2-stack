@@ -1,4 +1,4 @@
 maps_root: /exchange/data/hloc
-location_name: mlhall
+location_name: mlhall_hloc_registration
 overwrite: false
 mesh_path: /exchange/data/leica/mesh.ply

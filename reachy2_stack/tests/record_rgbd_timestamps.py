@@ -379,6 +379,51 @@ def save_camera_extrinsics_txt(reachy, out_dir: Path) -> None:
     except Exception as e:
         print("[REC] Failed to save camera extrinsics:", e)
 
+def save_camera_intrinsics_txt(reachy, out_dir: Path) -> None:
+    """
+    Save camera intrinsics to a plain text file.
+    """
+    try:
+        height, width, distortion_model, D, K, R, P = (
+            reachy.cameras.depth.get_parameters()
+        )
+
+        K = np.asarray(K, dtype=float)
+        D = np.asarray(D, dtype=float)
+        R = np.asarray(R, dtype=float)
+        P = np.asarray(P, dtype=float)
+
+        path = out_dir / "camera_intrinsics.txt"
+        with open(path, "w") as f:
+            f.write("# Camera intrinsics\n\n")
+
+            f.write(f"image_width  {width}\n")
+            f.write(f"image_height {height}\n\n")
+
+            f.write(f"distortion_model {distortion_model}\n")
+            f.write("distortion_coefficients\n")
+            f.write(" ".join(f"{v:.9f}" for v in D) + "\n\n")
+
+            f.write("camera_matrix_K\n")
+            for row in K:
+                f.write(" ".join(f"{v:.9f}" for v in row) + "\n")
+            f.write("\n")
+
+            f.write("rectification_matrix_R\n")
+            for row in R:
+                f.write(" ".join(f"{v:.9f}" for v in row) + "\n")
+            f.write("\n")
+
+            f.write("projection_matrix_P\n")
+            for row in P:
+                f.write(" ".join(f"{v:.9f}" for v in row) + "\n")
+
+        print(f"[REC] Camera intrinsics saved to {path}")
+
+    except Exception as e:
+        print("[REC] Failed to save camera intrinsics:", e)
+
+
 # =============== MAIN =================
 def main():
     cfg = ReachyConfig(host=HOST)
@@ -393,6 +438,7 @@ def main():
     run_dir = OUT_ROOT / f"run_{time.strftime('%Y%m%d_%H%M%S')}"
     run_dir.mkdir(parents=True, exist_ok=True)
     save_camera_extrinsics_txt(reachy, run_dir)
+    save_camera_intrinsics_txt(reachy,run_dir)
 
     recorder = RawRecorder(run_dir, MAX_QUEUE)
     recorder.start()

@@ -56,6 +56,8 @@ def main() -> None:
     client = ReachyClient(cfg_reachy)
     client.connect()
     print("Reachy connected.")
+    client.turn_on_all()
+
 
     # ------------------------------------------------------
     # 3. Initialize WorldModel from Reachy calibration

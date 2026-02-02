@@ -65,6 +65,7 @@ def main() -> None:
         # 4) Chained gotos (non-blocking) -----------------------------------
         print("[BASE] Chaining two odom gotos (non-blocking)...")
         g4 = base.goto_odom(x=0.0, y=0.0, theta=0.0, wait=False)
+        
         g5 = base.goto_odom(x=0.4, y=0.0, theta=0.0, wait=False)
 
         print(f"[BASE] g4 id={getattr(g4, 'id', None)}, g5 id={getattr(g5, 'id', None)}")

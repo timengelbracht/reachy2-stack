@@ -6,6 +6,7 @@ import numpy as np
 from matplotlib import pyplot as plt
 import json
 
+
 from reachy2_stack.utils.utils_dataclass import ReachyConfig
 from reachy2_stack.core.client import ReachyClient
 from reachy2_stack.infra.world_model import WorldModel, WorldModelConfig

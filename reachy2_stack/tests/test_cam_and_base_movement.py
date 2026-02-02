@@ -24,7 +24,7 @@ WZ = 110.0
 RENDER_FPS = 20        # try 15–25 for smooth + low CPU
 GRAB_EVERY_N = 1       # grab every loop; set 2 to halve camera calls
 SHOW_RGB = True
-SHOW_DEPTH = False
+SHOW_DEPTH = True
 
 # Depth display
 DEPTH_CMAP = "viridis"
@@ -80,6 +80,7 @@ def camera_loop(reachy, stop_evt: threading.Event) -> None:
         if grab_count % GRAB_EVERY_N == 0:
             try:
                 if SHOW_RGB:
+                    print(reachy.cameras)
                     frame, _ = reachy.cameras.depth.get_frame()
                     frame = np.asarray(frame)
                     if frame.ndim == 3 and frame.shape[2] == 3:
@@ -266,6 +267,7 @@ def main() -> None:
             reachy.mobile_base.turn_off()
         except Exception:
             pass
+        client.turn_off_all()
         client.close()
 
 
