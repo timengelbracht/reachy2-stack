@@ -45,9 +45,9 @@ STATE_HZ = 15  # Hz for camera + odometry
 
 # Teleop
 CMD_HZ = 30
-VX = 0.6
-VY = 0.6
-WZ = 110.0
+VX = 0.3
+VY = 0.3
+WZ = 60.0
 
 # Mapping
 MAPPING_HZ = 2.0  # Hz for mapping requests
