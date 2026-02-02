@@ -209,3 +209,15 @@ data/
 
 # CLAUDE md
 CLAUDE.md
+rgbd_odom_recordings
+*.png
+*.npy
+*.jpg
+*.h5
+*.pkl
+*.csv
+*.ply
+*.bin
+*.json
+colmap*
+*.db
