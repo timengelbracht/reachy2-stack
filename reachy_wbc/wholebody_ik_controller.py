@@ -8,17 +8,17 @@ in the odom (world) frame.
 
 If IK fails, falls back to a CSV lookup table of pre-sampled feasible poses.
 
+Trajectory execution uses minimum-jerk (quintic) time scaling so that
+both arm joints and base follow a coordinated profile completing in
+exactly `target_time` seconds, with zero velocity/acceleration at
+start and end.
+
 Subscribe:  /target_ee_pose_world   (PoseStamped, frame: odom)
             /odom                   (Odometry)
             /joint_states           (JointState)
 Publish:    /cmd_vel                (Twist)
             /r_arm_forward_position_controller/commands
             /wholebody_feedback     (PoseStamped)
-
-Improvements vs your original:
-  - Soft gating of base motion (base can start moving early, not “arm then base”)
-  - Braking/slowdown radii for position + yaw to reduce overshoot
-  - Near-goal filter reset (prevents “coasting” from low-pass smoothing)
 """
 
 import csv
@@ -387,8 +387,7 @@ class WholeBodyIKController(Node):
         self.declare_parameter("base_speed", 0.12)
         self.declare_parameter("base_angular_speed", 0.3)
 
-        self.declare_parameter("arm_joint_speed", 2.0)         # rad/s per joint
-        self.declare_parameter("arm_priority_threshold", 0.15) # rad, used to *scale* base now
+        self.declare_parameter("target_time", 0.3)               # trajectory duration in seconds
 
         self.declare_parameter("base_pos_tolerance", 0.02)
         self.declare_parameter("base_yaw_tolerance", 0.03)
@@ -396,22 +395,13 @@ class WholeBodyIKController(Node):
         self.declare_parameter("ik_pos_tol", 0.002)
         self.declare_parameter("ik_ori_tol", 0.02)
         self.declare_parameter("ik_damping", 0.05)
-        self.declare_parameter("ik_base_pos_weight", 3.0) #0.5
-        self.declare_parameter("ik_base_yaw_weight", 2.0) #0.3
-        self.declare_parameter("arm_only_first", False)  # True = try arm-only before whole-body
-
-        # New: base braking parameters to reduce overshoot
-        self.declare_parameter("base_slow_radius", 0.20)     # m
-        self.declare_parameter("yaw_slow_radius", 0.40)      # rad
-        self.declare_parameter("near_goal_pos", 0.06)        # m
-        self.declare_parameter("near_goal_yaw", 0.10)        # rad
-        self.declare_parameter("base_min_scale", 0.15)       # allow base to start moving early
-        self.declare_parameter("base_filter_alpha", 0.15)    # smoothing far from goal
+        self.declare_parameter("ik_base_pos_weight", 5.0)
+        self.declare_parameter("ik_base_yaw_weight", 3.0)
+        self.declare_parameter("arm_only_first", False)
 
         self.base_speed = float(self.get_parameter("base_speed").value)
         self.base_ang_speed = float(self.get_parameter("base_angular_speed").value)
-        self.arm_joint_speed = float(self.get_parameter("arm_joint_speed").value)
-        self.arm_priority_thresh = float(self.get_parameter("arm_priority_threshold").value)
+        self.target_time = float(self.get_parameter("target_time").value)
         self.base_pos_tol = float(self.get_parameter("base_pos_tolerance").value)
         self.base_yaw_tol = float(self.get_parameter("base_yaw_tolerance").value)
 
@@ -421,13 +411,6 @@ class WholeBodyIKController(Node):
         self.ik_base_pos_w = float(self.get_parameter("ik_base_pos_weight").value)
         self.ik_base_yaw_w = float(self.get_parameter("ik_base_yaw_weight").value)
         self.arm_only_first = self.get_parameter("arm_only_first").value
-
-        self.base_slow_radius = float(self.get_parameter("base_slow_radius").value)
-        self.yaw_slow_radius = float(self.get_parameter("yaw_slow_radius").value)
-        self.near_goal_pos = float(self.get_parameter("near_goal_pos").value)
-        self.near_goal_yaw = float(self.get_parameter("near_goal_yaw").value)
-        self.base_min_scale = float(self.get_parameter("base_min_scale").value)
-        self.base_filter_alpha = float(self.get_parameter("base_filter_alpha").value)
 
         # Load fallback CSV
         csv_path = self.get_parameter("csv_path").value
@@ -462,7 +445,13 @@ class WholeBodyIKController(Node):
         self.active = False
         self.base_arrived = False
 
-        # Smoothed velocity (for damping)
+        # Trajectory interpolation state
+        self.traj_start_time = None
+        self.traj_duration = 1.0
+        self.traj_start_joints = np.zeros(7)
+        self.traj_start_base = (0.0, 0.0, 0.0)  # (x, y, yaw)
+
+        # Smoothed velocity (for base tracking)
         self.cmd_vx = 0.0
         self.cmd_vy = 0.0
         self.cmd_wz = 0.0
@@ -614,42 +603,86 @@ class WholeBodyIKController(Node):
         self._set_targets(new_bx, new_by, self.base_yaw, fb_joints)
 
     def _set_targets(self, bx, by, byaw, joints):
-        """Common helper to activate a new target."""
+        """Activate a new target, snapshotting current state for trajectory start."""
         self.target_base_x = float(bx)
         self.target_base_y = float(by)
         self.target_base_yaw = float(byaw)
         self.target_joints = np.array(joints, dtype=np.float64)
 
-        self.commanded_joints = self.current_joints.copy()
+        # Snapshot current state as trajectory start.
+        # If mid-trajectory use commanded_joints (smooth restart);
+        # otherwise use current_joints (avoids zeros-at-init).
+        if self.active:
+            self.traj_start_joints = self.commanded_joints.copy()
+        else:
+            self.traj_start_joints = self.current_joints.copy()
+        self.traj_start_base = (float(self.base_x), float(self.base_y), float(self.base_yaw))
+        self.traj_start_time = self.get_clock().now()
+
+        # Scale duration proportional to displacement so peak velocity
+        # stays consistent regardless of motion size (prevents speed
+        # burst when teleop commands stop arriving).
+        max_joint_delta = float(np.max(np.abs(self.target_joints - self.traj_start_joints)))
+        base_delta = float(np.hypot(self.target_base_x - self.base_x,
+                                     self.target_base_y - self.base_y))
+        # Normalize: target_time is the duration for a "full" motion
+        # (1 rad joint move or 0.15m base move, whichever is larger)
+        motion_scale = max(max_joint_delta / 1.0, base_delta / 0.15)
+        self.traj_duration = float(np.clip(
+            self.target_time * motion_scale,
+            0.05,               # minimum 50ms to avoid instant snaps
+            self.target_time,   # never longer than target_time
+        ))
+
+        self.commanded_joints = self.traj_start_joints.copy()
+
+        # Only reset velocity filter on fresh starts, not mid-teleop restarts.
+        # Resetting every frame kills base velocity during continuous commands.
+        if not self.active:
+            self.cmd_vx = 0.0
+            self.cmd_vy = 0.0
+            self.cmd_wz = 0.0
+
         self.active = True
         self.base_arrived = False
 
-        # reset filter so we don't “carry momentum” from previous target
-        self.cmd_vx = 0.0
-        self.cmd_vy = 0.0
-        self.cmd_wz = 0.0
+    # ── Minimum-jerk trajectory ─────────────────────────────────────────
+
+    @staticmethod
+    def _min_jerk(t, T):
+        """Minimum-jerk (quintic) time scaling: s in [0, 1].
+
+        s(t) = 10*(t/T)^3 - 15*(t/T)^4 + 6*(t/T)^5
+        Zero velocity and acceleration at start and end.
+        """
+        if T <= 0.0:
+            return 1.0
+        tau = min(t / T, 1.0)
+        return 10.0 * tau**3 - 15.0 * tau**4 + 6.0 * tau**5
 
     # ── Control loop (50 Hz) ──────────────────────────────────────────────
 
     def _tick(self):
         if not self.active or self.target_joints is None:
             return
-        if self.base_x is None:
+        if self.base_x is None or self.traj_start_time is None:
             return
 
-        dt = 1.0 / CTRL_RATE
+        # ── 1) Compute trajectory progress s ∈ [0, 1] ───────────────────
+        now = self.get_clock().now()
+        elapsed = (now - self.traj_start_time).nanoseconds * 1e-9
+        s = self._min_jerk(elapsed, self.traj_duration)
 
-        # ── 1) Interpolate arm joints toward target ──────────────────────
-        joint_diff = self.target_joints - self.commanded_joints
-        max_step = self.arm_joint_speed * dt
-        step = np.clip(joint_diff, -max_step, max_step)
-        self.commanded_joints += step
+        # ── 2) Interpolate arm joints ────────────────────────────────────
+        self.commanded_joints = self.traj_start_joints + s * (self.target_joints - self.traj_start_joints)
 
         arm_msg = Float64MultiArray()
         arm_msg.data = self.commanded_joints.tolist()
         self.arm_pub.publish(arm_msg)
 
-        # ── 2) Base target error ─────────────────────────────────────────
+        # ── 3) Base: track FINAL target directly with P-control ─────────
+        #    (no trajectory interpolation — the base uses cmd_vel so
+        #     proportional control + braking handles smooth deceleration)
         dx = self.target_base_x - self.base_x
         dy = self.target_base_y - self.base_y
         dyaw = self._angle_diff(self.target_base_yaw, self.base_yaw)
@@ -657,8 +690,8 @@ class WholeBodyIKController(Node):
         pos_dist = float(np.hypot(dx, dy))
         yaw_dist = float(abs(dyaw))
 
-        # Arrival check
-        if pos_dist < self.base_pos_tol and yaw_dist < self.base_yaw_tol:
+        # ── 4) Arrival check (arm trajectory done AND base close) ────────
+        if s >= 1.0 and pos_dist < self.base_pos_tol and yaw_dist < self.base_yaw_tol:
             if not self.base_arrived:
                 self.base_arrived = True
                 self.cmd_vx = 0.0
@@ -666,61 +699,49 @@ class WholeBodyIKController(Node):
                 self.cmd_wz = 0.0
                 self.base_pub.publish(Twist())
                 self.get_logger().info(
-                    f"Base arrived. pos_err={pos_dist:.4f}m, yaw_err={yaw_dist:.4f}rad"
+                    f"Trajectory complete. pos_err={pos_dist:.4f}m, yaw_err={yaw_dist:.4f}rad"
                 )
                 self._publish_feedback()
             else:
                 self.base_pub.publish(Twist())
             return
 
-        # ── 3) Soft-gate base based on how close the arm is ──────────────
-        arm_remaining = float(np.max(np.abs(self.target_joints - self.commanded_joints)))
-        # readiness in [0,1], where 1 means arm is close
-        ready = 1.0 - np.clip(arm_remaining / (self.arm_priority_thresh * 3.0), 0.0, 1.0)
-        base_scale = self.base_min_scale + (1.0 - self.base_min_scale) * ready
-
-        # ── 4) Convert position error to base frame direction ────────────
+        # ── 5) Base velocity: P-control toward final target ──────────────
         c = np.cos(self.base_yaw)
-        s = np.sin(self.base_yaw)
-        vx_base =  c * dx + s * dy
-        vy_base = -s * dx + c * dy
+        sn = np.sin(self.base_yaw)
+        vx_base =  c * dx + sn * dy
+        vy_base = -sn * dx + c * dy
 
-        # ── 5) Braking: scale max speed down near target ─────────────────
-        # position speed target (m/s)
-        slow_r = max(self.base_slow_radius, 1e-6)
-        lin_speed_cap = self.base_speed * np.clip(pos_dist / slow_r, 0.0, 1.0)
-        # yaw speed target (rad/s)
-        yaw_slow = max(self.yaw_slow_radius, 1e-6)
-        ang_speed_cap = self.base_ang_speed * np.clip(yaw_dist / yaw_slow, 0.0, 1.0)
+        p_gain = 2.0
+        vx_cmd = vx_base * p_gain
+        vy_cmd = vy_base * p_gain
+        wz_cmd = dyaw * p_gain
 
-        # normalize direction and apply cap
-        lin_norm = float(np.hypot(vx_base, vy_base))
-        if lin_norm > 1e-6:
-            vx_base = vx_base / lin_norm * lin_speed_cap
-            vy_base = vy_base / lin_norm * lin_speed_cap
-        else:
-            vx_base = 0.0
-            vy_base = 0.0
+        # Braking near target: decelerate smoothly on approach
+        brake_radius = 0.15  # m
+        yaw_brake_radius = 0.30  # rad
+        lin_brake = float(np.clip(pos_dist / brake_radius, 0.0, 1.0))
+        yaw_brake = float(np.clip(yaw_dist / yaw_brake_radius, 0.0, 1.0))
 
-        ang_speed = float(np.sign(dyaw) * ang_speed_cap)
+        lin_cap = self.base_speed * lin_brake
+        lin_speed = float(np.hypot(vx_cmd, vy_cmd))
+        if lin_speed > lin_cap and lin_speed > 1e-6:
+            vx_cmd *= lin_cap / lin_speed
+            vy_cmd *= lin_cap / lin_speed
+        ang_cap = self.base_ang_speed * yaw_brake
+        wz_cmd = float(np.clip(wz_cmd, -ang_cap, ang_cap))
 
-        # ── 6) Smoothing far away, but avoid “coasting” near the goal ────
-        if pos_dist < self.near_goal_pos and yaw_dist < self.near_goal_yaw:
-            # near goal: remove lag/overshoot from filter
-            self.cmd_vx = vx_base
-            self.cmd_vy = vy_base
-            self.cmd_wz = ang_speed
-        else:
-            alpha = self.base_filter_alpha
-            self.cmd_vx += alpha * (vx_base - self.cmd_vx)
-            self.cmd_vy += alpha * (vy_base - self.cmd_vy)
-            self.cmd_wz += alpha * (ang_speed - self.cmd_wz)
+        # ── 6) Smoothing ─────────────────────────────────────────────────
+        alpha = 0.3
+        self.cmd_vx += alpha * (vx_cmd - self.cmd_vx)
+        self.cmd_vy += alpha * (vy_cmd - self.cmd_vy)
+        self.cmd_wz += alpha * (wz_cmd - self.cmd_wz)
 
-        # ── 7) Publish scaled command ────────────────────────────────────
+        # ── 7) Publish ───────────────────────────────────────────────────
         cmd = Twist()
-        cmd.linear.x = float(self.cmd_vx * base_scale)
-        cmd.linear.y = float(self.cmd_vy * base_scale)
-        cmd.angular.z = float(self.cmd_wz * base_scale)
+        cmd.linear.x = float(self.cmd_vx)
+        cmd.linear.y = float(self.cmd_vy)
+        cmd.angular.z = float(self.cmd_wz)
         self.base_pub.publish(cmd)
 
     @staticmethod
