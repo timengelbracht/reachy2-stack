@@ -30,10 +30,11 @@ from pathlib import Path
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, DurabilityPolicy
-from geometry_msgs.msg import PoseStamped, Twist
+from geometry_msgs.msg import PoseStamped, Twist, Point
 from std_msgs.msg import Float64MultiArray
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import JointState
+from visualization_msgs.msg import Marker, MarkerArray
 from tf2_ros import Buffer, TransformListener
 
 # ── Constants ────────────────────────────────────────────────────────────
@@ -429,6 +430,7 @@ class WholeBodyIKController(Node):
         self.base_pub = self.create_publisher(Twist, "/cmd_vel", 10)
         latching = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.fb_pub = self.create_publisher(PoseStamped, "/wholebody_feedback", latching)
+        self.marker_pub = self.create_publisher(MarkerArray, "/target_ee_marker", 10)
 
         # State
         self.base_x = None
@@ -506,6 +508,7 @@ class WholeBodyIKController(Node):
         T_target[:3, 3] = [p.x, p.y, p.z]
 
         self.get_logger().info(f"Target EE: ({p.x:.3f}, {p.y:.3f}, {p.z:.3f})")
+        self._publish_target_marker(T_target)
 
         # ── 1. Optionally try arm-only IK first ─────────────────────────
         if self.arm_only_first:
@@ -749,6 +752,45 @@ class WholeBodyIKController(Node):
         """Shortest angular difference, result in [-pi, pi]."""
         d = target - current
         return (d + np.pi) % (2 * np.pi) - np.pi
+
+    def _publish_target_marker(self, T_target):
+        """Publish XYZ axes marker at target pose for RViz visualization."""
+        stamp = self.get_clock().now().to_msg()
+        pos = T_target[:3, 3]
+        R = T_target[:3, :3]
+
+        axis_len = 0.10
+        shaft_d = 0.008
+        head_d = 0.015
+        colors = [(1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)]
+
+        markers = MarkerArray()
+        for i in range(3):
+            m = Marker()
+            m.header.frame_id = "odom"
+            m.header.stamp = stamp
+            m.ns = "target_ee_axes"
+            m.id = i
+            m.type = Marker.ARROW
+            m.action = Marker.ADD
+
+            tip = pos + R[:, i] * axis_len
+            m.points = [
+                Point(x=float(pos[0]), y=float(pos[1]), z=float(pos[2])),
+                Point(x=float(tip[0]), y=float(tip[1]), z=float(tip[2])),
+            ]
+            m.scale.x = shaft_d
+            m.scale.y = head_d
+            m.scale.z = 0.0
+
+            m.color.r = float(colors[i][0])
+            m.color.g = float(colors[i][1])
+            m.color.b = float(colors[i][2])
+            m.color.a = 1.0
+            m.lifetime.sec = 1  # auto-expire if no updates
+            markers.markers.append(m)
+
+        self.marker_pub.publish(markers)
 
     def _publish_feedback(self):
         T_ee = wholebody_fk(self.base_x, self.base_y, self.base_yaw, self.target_joints)
