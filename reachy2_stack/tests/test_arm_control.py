@@ -40,7 +40,7 @@ def main() -> None:
         else:
             q_curr, _ = client.get_joint_state_left()
         print(f"[ARM] Current joints ({SIDE}): {np.round(q_curr, 2)}")
-
+        print(q_curr)
         q_target = q_curr.copy()
         q_target[3] += -15.0  # small elbow bend
         print(f"[ARM] Joint-space goto -> {np.round(q_target, 2)}")

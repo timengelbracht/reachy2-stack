@@ -47,7 +47,7 @@ R_ARM_JOINTS = [
 JOINT_LIMITS_LOWER = np.array([-1.5708, -1.5708, -1.5708, -2.25, -0.7854, -0.7854, -1.57])
 JOINT_LIMITS_UPPER = np.array([ 1.5708,  0.0,     1.5708,  0.1,   0.7854,  0.7854,  1.57])
 
-CTRL_RATE = 50.0  # Hz
+CTRL_RATE = 100.0  # Hz
 
 # ── Homogeneous transform helpers ────────────────────────────────────────
 
@@ -393,6 +393,10 @@ class WholeBodyIKController(Node):
         self.declare_parameter("base_pos_tolerance", 0.02)
         self.declare_parameter("base_yaw_tolerance", 0.03)
 
+        self.declare_parameter("tracking_pos_threshold", 0.01)   # EE position threshold (m)
+        self.declare_parameter("tracking_ori_threshold", 0.05)   # EE orientation threshold (rad)
+        self.declare_parameter("tracking_timeout", 500.0)          # max tracking time (s), 0=no timeout
+
         self.declare_parameter("ik_pos_tol", 0.002)
         self.declare_parameter("ik_ori_tol", 0.02)
         self.declare_parameter("ik_damping", 0.05)
@@ -405,6 +409,10 @@ class WholeBodyIKController(Node):
         self.target_time = float(self.get_parameter("target_time").value)
         self.base_pos_tol = float(self.get_parameter("base_pos_tolerance").value)
         self.base_yaw_tol = float(self.get_parameter("base_yaw_tolerance").value)
+
+        self.tracking_pos_thr = float(self.get_parameter("tracking_pos_threshold").value)
+        self.tracking_ori_thr = float(self.get_parameter("tracking_ori_threshold").value)
+        self.tracking_timeout = float(self.get_parameter("tracking_timeout").value)
 
         self.ik_pos_tol = float(self.get_parameter("ik_pos_tol").value)
         self.ik_ori_tol = float(self.get_parameter("ik_ori_tol").value)
@@ -444,8 +452,10 @@ class WholeBodyIKController(Node):
         self.target_base_y = None
         self.target_base_yaw = None
         self.target_joints = None
+        self.T_target_world = None       # 4x4 target EE pose in odom frame
         self.active = False
         self.base_arrived = False
+        self.last_resolve_time = None    # rate-limit IK re-solves during tracking
 
         # Trajectory interpolation state
         self.traj_start_time = None
@@ -507,6 +517,7 @@ class WholeBodyIKController(Node):
         T_target[:3, :3] = Rotation.from_quat([o.x, o.y, o.z, o.w]).as_matrix()
         T_target[:3, 3] = [p.x, p.y, p.z]
 
+        self.T_target_world = T_target.copy()
         self.get_logger().info(f"Target EE: ({p.x:.3f}, {p.y:.3f}, {p.z:.3f})")
         self._publish_target_marker(T_target)
 
@@ -648,6 +659,7 @@ class WholeBodyIKController(Node):
 
         self.active = True
         self.base_arrived = False
+        self.last_resolve_time = None
 
     # ── Minimum-jerk trajectory ─────────────────────────────────────────
 
@@ -693,21 +705,74 @@ class WholeBodyIKController(Node):
         pos_dist = float(np.hypot(dx, dy))
         yaw_dist = float(abs(dyaw))
 
-        # ── 4) Arrival check (arm trajectory done AND base close) ────────
-        if s >= 1.0 and pos_dist < self.base_pos_tol and yaw_dist < self.base_yaw_tol:
-            if not self.base_arrived:
-                self.base_arrived = True
-                self.cmd_vx = 0.0
-                self.cmd_vy = 0.0
-                self.cmd_wz = 0.0
-                self.base_pub.publish(Twist())
-                self.get_logger().info(
-                    f"Trajectory complete. pos_err={pos_dist:.4f}m, yaw_err={yaw_dist:.4f}rad"
-                )
-                self._publish_feedback()
-            else:
-                self.base_pub.publish(Twist())
-            return
+        # ── 4) Tracking check: use actual EE pose error as stopping criterion ──
+        if s >= 1.0 and self.T_target_world is not None:
+            T_actual = wholebody_fk(self.base_x, self.base_y, self.base_yaw,
+                                     self.current_joints)
+            ee_err = pose_error_6d(T_actual, self.T_target_world)
+            ee_pos_err = float(np.linalg.norm(ee_err[:3]))
+            ee_ori_err = float(np.linalg.norm(ee_err[3:]))
+
+            # Timeout: stop tracking if we've been at it too long
+            timed_out = False
+            if self.tracking_timeout > 0.0:
+                tracking_elapsed = elapsed - self.traj_duration
+                if tracking_elapsed > self.tracking_timeout:
+                    timed_out = True
+
+            if timed_out or (ee_pos_err < self.tracking_pos_thr and ee_ori_err < self.tracking_ori_thr):
+                # EE is within threshold → done
+                if not self.base_arrived:
+                    self.base_arrived = True
+                    self.cmd_vx = 0.0
+                    self.cmd_vy = 0.0
+                    self.cmd_wz = 0.0
+                    self.base_pub.publish(Twist())
+                    reason = "timeout" if timed_out else "converged"
+                    self.get_logger().info(
+                        f"Tracking {reason}. ee_pos_err={ee_pos_err:.4f}m, "
+                        f"ee_ori_err={ee_ori_err:.4f}rad"
+                    )
+                    self._publish_feedback()
+                else:
+                    # Keep publishing target joints to hold position
+                    arm_msg = Float64MultiArray()
+                    arm_msg.data = self.target_joints.tolist()
+                    self.arm_pub.publish(arm_msg)
+                    self.base_pub.publish(Twist())
+                return
+
+            # EE error still too large — check if base reached its IK target
+            # but EE is still off → need to re-solve IK from current state
+            if pos_dist < self.base_pos_tol * 2 and yaw_dist < self.base_yaw_tol * 2:
+                should_resolve = False
+                if self.last_resolve_time is None:
+                    should_resolve = True
+                else:
+                    dt = (now - self.last_resolve_time).nanoseconds * 1e-9
+                    if dt > 0.5:  # re-solve at most 2Hz
+                        should_resolve = True
+
+                if should_resolve:
+                    self.last_resolve_time = now
+                    ok, bx, by, byaw, joints, iters = solve_wholebody_ik(
+                        self.T_target_world,
+                        base_xy_init=np.array([self.base_x, self.base_y]),
+                        base_yaw_init=self.base_yaw,
+                        joints_init=self.current_joints,
+                        pos_tol=self.ik_pos_tol,
+                        ori_tol=self.ik_ori_tol,
+                        damping=self.ik_damping,
+                        base_pos_weight=self.ik_base_pos_w,
+                        base_yaw_weight=self.ik_base_yaw_w,
+                    )
+                    if ok:
+                        self.get_logger().debug(
+                            f"Tracking re-solve: ee_pos_err={ee_pos_err:.4f}m, "
+                            f"ee_ori_err={ee_ori_err:.4f}rad → new IK in {iters} iters"
+                        )
+                        self._set_targets(bx, by, byaw, joints)
+                        return
 
         # ── 5) Base velocity: P-control toward final target ──────────────
         c = np.cos(self.base_yaw)

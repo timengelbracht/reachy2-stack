@@ -45,6 +45,7 @@ class OdometryState:
             T_base_cam = client.get_depth_extrinsics()
             with self.lock:
                 self.T_base_cam = np.array(T_base_cam, dtype=float)
+                print(T_base_cam)
                 print(f"[ODOM] Initialized camera extrinsics (base -> cam)")
         except Exception as e:
             print(f"[ODOM] Warning: Could not get camera extrinsics: {e}")

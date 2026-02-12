@@ -69,8 +69,8 @@ def convert_folder(depth_npy_dir: str, out_dir: str | None = None) -> None:
 
 
 if __name__ == "__main__":
-    DEPTH_NPY_DIR = "/exchange/out/run_20260129_173750/depth"
+    DEPTH_NPY_DIR = "/exchange/out/run_20260203_123459/depth"
 
-    OUT_DIR = "/exchange/out/pngs"
+    OUT_DIR = "/exchange/out/pngs_bottle"
 
     convert_folder(DEPTH_NPY_DIR, OUT_DIR)

@@ -404,7 +404,7 @@ class ReachyClient:
         Send EE pose goto and return True if accepted.
         This matches your earlier logic: gid None/-1 => failure.
         """
-        ARM_DURATION = 4.0
+        ARM_DURATION = 2.0
         resp = arm.goto(A_try, duration=ARM_DURATION, wait=True)
         gid = getattr(resp, "id", None)
         ok = gid is not None and gid != -1

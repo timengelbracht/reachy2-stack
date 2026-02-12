@@ -4,6 +4,8 @@
 import time
 import threading
 import cv2
+import numpy as np
+from pydualsense import pydualsense
 
 from reachy2_stack.utils.utils_dataclass import ReachyConfig
 from reachy2_stack.core.client import ReachyClient
@@ -53,7 +55,147 @@ ENABLE_MAPPING = True  # Enable 3D mapping from RGBD
 MAPPING_HZ = 2.0  # Point cloud generation rate in Hz (lower = less CPU)
 DEPTH_SCALE = 0.001  # Scale factor for depth (1.0 if already in meters, 0.001 if in mm)
 DEPTH_TRUNC = 3.5  # Maximum depth in meters to include in point cloud
+
+# DualSense Controller
+USE_DUALSENSE = True  # Use DualSense controller instead of keyboard
+CALIB_CENTER_SECONDS = 1.0  # Keep sticks untouched during calibration
+CALIB_RANGE_SECONDS = 2.0  # Move sticks to corners/circles during calibration
+RAW_DEADZONE = 10  # In raw units (0..255)
+EXPO = 1.0  # Exponential curve for stick response
+SMOOTH_ALPHA = 0.15  # Smoothing factor for commands
+REQUIRE_R1_ENABLE = True  # Only move while holding R1 (recommended for safety)
+STOP_BTN_CROSS = True  # X button stops movement
+QUIT_BTN_OPTIONS = True  # Options button quits
 # --------------------------------------
+
+
+def calibrate_center(ds: pydualsense, seconds: float) -> dict[str, float]:
+    """Calibrate the center position of controller sticks."""
+    t_end = time.time() + max(0.1, seconds)
+    xs = {"LX": [], "LY": [], "RX": [], "RY": []}
+    while time.time() < t_end:
+        st = ds.state
+        xs["LX"].append(st.LX)
+        xs["LY"].append(st.LY)
+        xs["RX"].append(st.RX)
+        xs["RY"].append(st.RY)
+        time.sleep(0.01)
+    return {k: float(np.mean(v)) for k, v in xs.items()}
+
+
+def calibrate_range(ds: pydualsense, seconds: float) -> tuple[dict[str, float], dict[str, float]]:
+    """Calibrate the min/max range of controller sticks."""
+    mins = {"LX": 1e9, "LY": 1e9, "RX": 1e9, "RY": 1e9}
+    maxs = {"LX": -1e9, "LY": -1e9, "RX": -1e9, "RY": -1e9}
+    t_end = time.time() + max(0.1, seconds)
+    while time.time() < t_end:
+        st = ds.state
+        vals = {"LX": st.LX, "LY": st.LY, "RX": st.RX, "RY": st.RY}
+        for k, v in vals.items():
+            mins[k] = min(mins[k], float(v))
+            maxs[k] = max(maxs[k], float(v))
+        time.sleep(0.01)
+    return mins, maxs
+
+
+def stick_u8_to_unit(v: int, *, vmin: float, vcenter: float, vmax: float, deadzone_raw: float, expo: float) -> float:
+    """
+    Symmetric normalization using calibrated min/center/max.
+    Guarantees: left extreme ~ -1, center ~ 0, right extreme ~ +1
+    (within the range you actually reach).
+    """
+    v = float(v)
+
+    if abs(v - vcenter) <= deadzone_raw:
+        return 0.0
+
+    if v > vcenter:
+        denom = max(1e-6, (vmax - vcenter) - deadzone_raw)
+        x = (v - vcenter - deadzone_raw) / denom
+    else:
+        denom = max(1e-6, (vcenter - vmin) - deadzone_raw)
+        x = (v - vcenter + deadzone_raw) / denom
+
+    x = float(np.clip(x, -1.0, 1.0))
+    s = 1.0 if x >= 0 else -1.0
+    x = s * (abs(x) ** expo)
+    return float(np.clip(x, -1.0, 1.0))
+
+
+def teleop_dualsense_loop(client: ReachyClient, stop_evt: threading.Event) -> None:
+    """Teleop loop using DualSense controller."""
+    ds = pydualsense()
+    ds.init()
+    dt = 1.0 / CMD_HZ
+
+    print("\n[DUALSENSE] Center calibration: DO NOT touch sticks...")
+    centers = calibrate_center(ds, CALIB_CENTER_SECONDS)
+    print("[DUALSENSE] centers:", {k: round(v, 2) for k, v in centers.items()})
+
+    print(f"[DUALSENSE] Range calibration: MOVE sticks to corners for {CALIB_RANGE_SECONDS:.1f}s...")
+    mins, maxs = calibrate_range(ds, CALIB_RANGE_SECONDS)
+    print("[DUALSENSE] mins:", mins)
+    print("[DUALSENSE] maxs:", maxs)
+    print(f"[DUALSENSE] deadzone=±{RAW_DEADZONE} raw, expo={EXPO}")
+
+    vx_f = vy_f = wz_f = 0.0
+
+    print(
+        "\n[DUALSENSE TELEOP]\n"
+        "Left stick: move (forward/back/left/right)\n"
+        "Right stick X: rotate\n"
+        "R1: hold-to-enable (safety)\n"
+        "X (cross): stop\n"
+        "Options: quit\n"
+    )
+
+    try:
+        while not stop_evt.is_set():
+            st = ds.state
+
+            if QUIT_BTN_OPTIONS and st.options:
+                stop_evt.set()
+                break
+
+            enabled = (not REQUIRE_R1_ENABLE) or bool(st.R1)
+
+            lx = stick_u8_to_unit(
+                st.LX, vmin=mins["LX"], vcenter=centers["LX"], vmax=maxs["LX"],
+                deadzone_raw=RAW_DEADZONE, expo=EXPO
+            )
+            ly = stick_u8_to_unit(
+                st.LY, vmin=mins["LY"], vcenter=centers["LY"], vmax=maxs["LY"],
+                deadzone_raw=RAW_DEADZONE, expo=EXPO
+            )
+            rx = stick_u8_to_unit(
+                st.RX, vmin=mins["RX"], vcenter=centers["RX"], vmax=maxs["RX"],
+                deadzone_raw=RAW_DEADZONE, expo=EXPO
+            )
+
+            # NOTE: DualSense LY: 255 is "up". We want up => forward => +vx
+            vx = (-ly) * VX
+            vy = (-lx) * VY
+            wz = (-rx) * WZ
+
+            if not enabled:
+                vx = vy = wz = 0.0
+
+            if STOP_BTN_CROSS and st.cross:
+                vx = vy = wz = 0.0
+
+            vx_f = (1.0 - SMOOTH_ALPHA) * vx_f + SMOOTH_ALPHA * vx
+            vy_f = (1.0 - SMOOTH_ALPHA) * vy_f + SMOOTH_ALPHA * vy
+            wz_f = (1.0 - SMOOTH_ALPHA) * wz_f + SMOOTH_ALPHA * wz
+
+            client.goto_base_defined_speed(vx_f, vy_f, wz_f)
+            time.sleep(dt)
+
+    finally:
+        client.goto_base_defined_speed(0.0, 0.0, 0.0)
+        try:
+            ds.close()
+        except Exception:
+            pass
 
 
 def main() -> None:
@@ -106,17 +248,25 @@ def main() -> None:
         daemon=True,
     ) if ENABLE_MAPPING else None
 
-    teleop_thread = threading.Thread(
-        target=teleop_loop,
-        args=(client, stop_evt),
-        kwargs={
-            "cmd_hz": CMD_HZ,
-            "vx": VX,
-            "vy": VY,
-            "wz": WZ,
-        },
-        daemon=True,
-    )
+    # Choose teleop method based on configuration
+    if USE_DUALSENSE:
+        teleop_thread = threading.Thread(
+            target=teleop_dualsense_loop,
+            args=(client, stop_evt),
+            daemon=True,
+        )
+    else:
+        teleop_thread = threading.Thread(
+            target=teleop_loop,
+            args=(client, stop_evt),
+            kwargs={
+                "cmd_hz": CMD_HZ,
+                "vx": VX,
+                "vy": VY,
+                "wz": WZ,
+            },
+            daemon=True,
+        )
 
     odom_thread = threading.Thread(
         target=odometry_loop,
