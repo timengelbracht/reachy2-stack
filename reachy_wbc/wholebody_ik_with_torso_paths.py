@@ -24,13 +24,11 @@ from std_msgs.msg import Float64MultiArray
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import JointState
 from visualization_msgs.msg import Marker, MarkerArray
-from tf2_ros import Buffer, TransformListener
 
 from wholebody_ik_controller import (
     arm_fk, wholebody_fk, pose_error_6d,
     solve_arm_only_ik, solve_wholebody_ik, load_fallback_csv,
-    _Rz, T_BASE_TO_TORSO, R_ARM_JOINTS,
-    JOINT_LIMITS_LOWER, JOINT_LIMITS_UPPER, CTRL_RATE,
+    _Rz, T_BASE_TO_TORSO, R_ARM_JOINTS, CTRL_RATE,
 )
 from scipy.spatial import KDTree
 
@@ -78,9 +76,9 @@ class TorsoIKControllerFast(Node):
         self.declare_parameter("base_pos_tolerance", 0.02)
         self.declare_parameter("base_yaw_tolerance", 0.03)
 
-        self.declare_parameter("tracking_pos_threshold", 0.01)
-        self.declare_parameter("tracking_ori_threshold", 0.05)
-        self.declare_parameter("tracking_timeout", 500.0)
+        self.declare_parameter("tracking_pos_threshold", 0.02)
+        self.declare_parameter("tracking_ori_threshold", 0.1)
+        self.declare_parameter("tracking_timeout", 15.0)
 
         self.declare_parameter("ik_pos_tol", 0.002)
         self.declare_parameter("ik_ori_tol", 0.02)
@@ -88,7 +86,7 @@ class TorsoIKControllerFast(Node):
         self.declare_parameter("ik_base_pos_weight", 50.0)
         self.declare_parameter("ik_base_yaw_weight", 30.0)
         self.declare_parameter("arm_only_first", False)
-        self.declare_parameter("max_joint_vel", 200.0)
+        self.declare_parameter("max_joint_vel", 100.0)
         self.declare_parameter("joint_smoothing", 0.08)
 
         # Interpolation parameters
@@ -127,10 +125,6 @@ class TorsoIKControllerFast(Node):
         self.fb_tree = KDTree(self.fb_positions)
         self.get_logger().info(f"Loaded {len(self.fb_positions)} fallback samples")
 
-        # TF
-        self.tf_buffer = Buffer()
-        self.tf_listener = TransformListener(self.tf_buffer, self)
-
         # Publishers
         self.arm_pub = self.create_publisher(
             Float64MultiArray, "/r_arm_forward_position_controller/commands", 10
@@ -156,12 +150,12 @@ class TorsoIKControllerFast(Node):
         self.active = False
         self.base_arrived = False
         self.last_resolve_time = None
+        self.tracking_start_time = None
 
         # Trajectory interpolation state
         self.traj_start_time = None
         self.traj_duration = 1.0
         self.traj_start_joints = np.zeros(7)
-        self.traj_start_base = (0.0, 0.0, 0.0)
 
         # Smoothed velocity
         self.cmd_vx = 0.0
@@ -225,7 +219,7 @@ class TorsoIKControllerFast(Node):
             self.get_logger().error("No odom yet")
             return
         if not self.joints_received:
-            self.get_logger().warn("No joint states yet, using zeros as seed")
+            self.get_logger().info("No joint states yet, using zeros as seed")
 
         # Parse target pose in torso frame
         p = msg.pose.position
@@ -287,6 +281,7 @@ class TorsoIKControllerFast(Node):
             return
 
         # Store pre-computed solutions and start executing
+        self.tracking_start_time = None
         self.waypoint_solutions = solutions
         self._execute_next_waypoint()
 
@@ -300,9 +295,9 @@ class TorsoIKControllerFast(Node):
             self.get_logger().error("No odom yet")
             return
         if not self.joints_received:
-            self.get_logger().warn("No joint states yet, using zeros as seed")
+            self.get_logger().info("No joint states yet, using zeros as seed")
         if len(msg.poses) == 0:
-            self.get_logger().warn("Empty path received, ignoring")
+            self.get_logger().info("Empty path received, ignoring")
             return
 
         # Parse all poses into 4x4 transforms (torso frame)
@@ -364,6 +359,7 @@ class TorsoIKControllerFast(Node):
             self.get_logger().error("All path IK solves failed!")
             return
 
+        self.tracking_start_time = None
         self.waypoint_solutions = solutions
         self._execute_next_waypoint()
 
@@ -451,7 +447,7 @@ class TorsoIKControllerFast(Node):
                 continue
 
             # Final waypoint failed — use CSV fallback
-            self.get_logger().warn(
+            self.get_logger().info(
                 f"Final waypoint IK failed (pos_err={p_err:.3f}m). CSV fallback."
             )
             fb_sol = self._fallback_csv_solve(T_target_odom)
@@ -506,7 +502,6 @@ class TorsoIKControllerFast(Node):
             self.traj_start_joints = self.smoothed_joints.copy()
         else:
             self.traj_start_joints = self.current_joints.copy()
-        self.traj_start_base = (float(self.base_x), float(self.base_y), float(self.base_yaw))
         self.traj_start_time = self.get_clock().now()
 
         max_joint_delta = float(np.max(np.abs(self.target_joints - self.traj_start_joints)))
@@ -584,6 +579,10 @@ class TorsoIKControllerFast(Node):
 
             # Final waypoint: full EE tracking
             if self.T_target_world is not None:
+                # Start the tracking clock on first entry
+                if self.tracking_start_time is None:
+                    self.tracking_start_time = now
+
                 T_actual = wholebody_fk(
                     self.base_x, self.base_y, self.base_yaw, self.current_joints
                 )
@@ -593,29 +592,40 @@ class TorsoIKControllerFast(Node):
 
                 timed_out = False
                 if self.tracking_timeout > 0.0:
-                    tracking_elapsed = elapsed - self.traj_duration
+                    tracking_elapsed = (now - self.tracking_start_time).nanoseconds * 1e-9
                     if tracking_elapsed > self.tracking_timeout:
                         timed_out = True
 
                 if timed_out or (ee_pos_err < self.tracking_pos_thr
                                  and ee_ori_err < self.tracking_ori_thr):
-                    if not self.base_arrived:
-                        self.base_arrived = True
-                        self.cmd_vx = 0.0
-                        self.cmd_vy = 0.0
-                        self.cmd_wz = 0.0
-                        self.base_pub.publish(Twist())
-                        reason = "timeout" if timed_out else "converged"
+                    # Send final commands once, then deactivate
+                    arm_msg = Float64MultiArray()
+                    arm_msg.data = self.target_joints.tolist()
+                    self.arm_pub.publish(arm_msg)
+                    self.base_pub.publish(Twist())
+
+                    if timed_out:
                         self.get_logger().info(
-                            f"Tracking {reason}. ee_pos_err={ee_pos_err:.4f}m, "
-                            f"ee_ori_err={ee_ori_err:.4f}rad"
+                            f"TIMEOUT after {self.tracking_timeout:.1f}s — "
+                            f"target NOT reached. "
+                            f"ee_pos_err={ee_pos_err:.4f}m, "
+                            f"ee_ori_err={ee_ori_err:.4f}rad. "
+                            f"Controller deactivated."
+                        )
+                    else:
+                        self.get_logger().info(
+                            f"TARGET REACHED. "
+                            f"ee_pos_err={ee_pos_err:.4f}m, "
+                            f"ee_ori_err={ee_ori_err:.4f}rad. "
+                            f"Controller deactivated."
                         )
 
-                    else:
-                        arm_msg = Float64MultiArray()
-                        arm_msg.data = self.target_joints.tolist()
-                        self.arm_pub.publish(arm_msg)
-                        self.base_pub.publish(Twist())
+                    self.active = False
+                    self.base_arrived = True
+                    self.cmd_vx = 0.0
+                    self.cmd_vy = 0.0
+                    self.cmd_wz = 0.0
+                    self.smoothed_joints = None
                     return
 
                 # Re-solve IK if base near target but EE still off
