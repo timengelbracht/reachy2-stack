@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 """
- torso-frame IK controller for Reachy2.
+torso-frame IK controller for Reachy2.
 
   1. Batch pre-solve: all waypoint IK solutions computed upfront in _on_target
   2. Warm-start: each waypoint IK seeded from previous waypoint's solution
-  3. Relaxed params for intermediate waypoints (fewer iters, no restarts, looser tol)
-
+ 
 Subscribe:  /target_ee_pose_torso   (PoseStamped, frame: torso)
             /odom                   (Odometry)
             /joint_states           (JointState)
 Publish:    /cmd_vel                (Twist)
             /r_arm_forward_position_controller/commands
-            /wholebody_feedback     (PoseStamped)
 """
 
 import numpy as np
@@ -21,7 +19,6 @@ import time
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, DurabilityPolicy
 from geometry_msgs.msg import PoseArray, PoseStamped, Twist, Point
 from std_msgs.msg import Float64MultiArray
 from nav_msgs.msg import Odometry
@@ -139,8 +136,6 @@ class TorsoIKControllerFast(Node):
             Float64MultiArray, "/r_arm_forward_position_controller/commands", 10
         )
         self.base_pub = self.create_publisher(Twist, "/cmd_vel", 10)
-        latching = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
-        self.fb_pub = self.create_publisher(PoseStamped, "/wholebody_feedback", latching)
         self.marker_pub = self.create_publisher(MarkerArray, "/target_ee_marker", 10)
         self.wp_marker_pub = self.create_publisher(MarkerArray, "/waypoint_markers", 10)
 
@@ -615,7 +610,7 @@ class TorsoIKControllerFast(Node):
                             f"Tracking {reason}. ee_pos_err={ee_pos_err:.4f}m, "
                             f"ee_ori_err={ee_ori_err:.4f}rad"
                         )
-                        self._publish_feedback()
+
                     else:
                         arm_msg = Float64MultiArray()
                         arm_msg.data = self.target_joints.tolist()
@@ -793,20 +788,6 @@ class TorsoIKControllerFast(Node):
 
         self.marker_pub.publish(markers)
 
-    def _publish_feedback(self):
-        T_ee = wholebody_fk(self.base_x, self.base_y, self.base_yaw, self.target_joints)
-        fb = PoseStamped()
-        fb.header.stamp = self.get_clock().now().to_msg()
-        fb.header.frame_id = "odom"
-        fb.pose.position.x = float(T_ee[0, 3])
-        fb.pose.position.y = float(T_ee[1, 3])
-        fb.pose.position.z = float(T_ee[2, 3])
-        quat = Rotation.from_matrix(T_ee[:3, :3]).as_quat()
-        fb.pose.orientation.x = float(quat[0])
-        fb.pose.orientation.y = float(quat[1])
-        fb.pose.orientation.z = float(quat[2])
-        fb.pose.orientation.w = float(quat[3])
-        self.fb_pub.publish(fb)
 
 
 def main():
